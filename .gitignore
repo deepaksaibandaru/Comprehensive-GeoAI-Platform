@@ -57,6 +57,7 @@ uploads/*
 annotations/*
 !annotations/.gitkeep
 !annotations/Building_Masks_WGS84.geojson
+!annotations/Building_Masks_WholeBuildings.geojson
 !annotations/Building_Riffa_Bahrain.geojson
 !annotations/bahrain_smallarea.geojson
 
