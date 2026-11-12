@@ -1,5 +1,44 @@
 [
   {
+    "id": "proj_bd_whole",
+    "name": "bd_whole",
+    "created": "11/12/2026, 08:30:00 PM",
+    "updated": "11/12/2026, 08:30:00 PM",
+    "labels": [
+      "background",
+      "bd_whole"
+    ],
+    "annotations_count": 4181,
+    "chips_count": 99,
+    "has_model": false,
+    "model_path": null,
+    "evaluation_score": null,
+    "image_path": "uploads\\map_capture_20261111_202107.png",
+    "annotation_path": "annotations\\Building_Masks_WholeBuildings.geojson",
+    "dataset_dir": "labels/bd_whole/dataset",
+    "task_type": "Image Segmentation",
+    "dataset_type": "Optical Satellite Imagery",
+    "model_type": "Mask R-CNN",
+    "model_type_key": "mask_rcnn",
+    "feature_extractor": "resnet50",
+    "fuse_at": "bottleneck",
+    "support_weight": 0.3,
+    "description": "Whole building extraction from satellite imagery",
+    "mode": "binary",
+    "crs": "EPSG:4326",
+    "bounds": {
+      "west": 50.18793791335404,
+      "south": 26.173322973050507,
+      "east": 50.21435508664596,
+      "north": 26.19181602490009,
+      "crs": "EPSG:4326",
+      "zoom": 17,
+      "service": "satellite",
+      "image_width": 2464,
+      "image_height": 1922
+    }
+  },
+  {
     "id": "proj_23594354",
     "name": "build_11",
     "created": "11/11/2026, 07:41:25 PM",

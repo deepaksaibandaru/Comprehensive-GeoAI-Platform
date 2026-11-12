@@ -333,7 +333,12 @@ def ensure_label_folders(label_name):
         os.makedirs(os.path.join(lp, sub), exist_ok=True)
     return lp
 
-def get_all_labels(): return load_labels_index().get("labels", [])
+def get_all_labels():
+    labels = load_labels_index().get("labels", [])
+    for lbl in labels:
+        try: ensure_label_folders(lbl)
+        except Exception: pass
+    return labels
 
 def load_uploaded_datasets():
     if os.path.exists(UPLOADED_DATASETS_FILE):
