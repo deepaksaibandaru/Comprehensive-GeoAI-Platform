@@ -1,0 +1,780 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Braein.ai - Comprehensive GeoAI Platform</title>
+    <link rel="stylesheet" href="/static/vendor/leaflet/leaflet.css" />
+    <link rel="stylesheet" href="/static/vendor/leaflet-draw/leaflet.draw.css" />
+    <link rel="stylesheet" href="/static/vendor/font-awesome/css/all.min.css" />
+    <script src="/static/vendor/leaflet/leaflet.js"></script>
+    <script src="/static/vendor/leaflet-draw/leaflet.draw.js"></script>
+
+    <style>
+        /* ===== Global & Layout ===== */
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #0a0e17; color: #e2e8f0; height: 100vh; overflow: hidden; font-size: 12px; }
+        .app-container { display: flex; height: 100vh; }
+
+        /* ===== Sidebar ===== */
+        .sidebar {
+            width: 220px; background: #0f172a; border-right: 2px solid #1e293b;
+            display: flex; flex-direction: column; flex-shrink: 0; overflow-y: auto; padding: 16px 0; z-index: 20;
+        }
+        .sidebar-brand { padding: 12px 16px 14px; border-bottom: 2px solid #1e293b; margin-bottom: 16px; display: flex; align-items: center; gap: 10px; }
+        .sidebar-brand .brand-logo { width: 38px; height: 38px; flex-shrink: 0; }
+        .sidebar-brand .brand-text h2 { font-size: 20px; font-weight: 700; background: linear-gradient(135deg, #4ecdc4, #0891b2); -webkit-background-clip: text; -webkit-text-fill-color: transparent; margin: 0; letter-spacing: -0.3px; }
+        .sidebar-brand .brand-text small { color: #64748b; font-size: 9px; display: block; margin-top: 3px; }
+        .sidebar-user { display: flex; align-items: center; gap: 10px; padding: 10px 14px; margin: 0 10px 10px; background: rgba(255,255,255,.06); border-radius: 8px; }
+        .sidebar-user-text { flex: 1; min-width: 0; line-height: 1.25; }
+        .sidebar-user-text strong { display: block; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .sidebar-user-text small { font-size: 11px; opacity: .7; }
+        .sidebar-logout { color: inherit; opacity: .7; text-decoration: none; }
+        .sidebar-menu { flex: 1; }
+        .sidebar-menu .menu-section { padding: 0 12px; margin-bottom: 12px; }
+        .sidebar-menu .menu-section-title { font-size: 9px; text-transform: uppercase; letter-spacing: 1px; color: #475569; font-weight: 700; padding: 0 6px; margin-bottom: 4px; }
+        .sidebar-menu .menu-item { display: flex; align-items: center; gap: 10px; padding: 6px 12px; border-radius: 6px; color: #94a3b8; cursor: pointer; transition: all 0.2s ease; font-size: 12px; font-weight: 500; border: none; background: transparent; width: 100%; text-align: left; }
+        .sidebar-menu .menu-item:hover { background: #1e293b; color: #e2e8f0; }
+        .sidebar-menu .menu-item.active { background: #1e293b; color: #4ecdc4; border-left: 3px solid #4ecdc4; }
+        .sidebar-menu .menu-item i { width: 16px; font-size: 13px; text-align: center; }
+        .sidebar-menu .menu-item .badge { margin-left: auto; background: #1e293b; padding: 1px 6px; border-radius: 8px; font-size: 9px; font-weight: 700; color: #4ecdc4; }
+        .sidebar-footer { padding: 12px 16px; border-top: 2px solid #1e293b; font-size: 10px; color: #475569; }
+
+        /* ===== Main Content ===== */
+        .main-content { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0; }
+        .top-header { background: #0f172a; padding: 8px 20px; border-bottom: 2px solid #1e293b; display: flex; justify-content: space-between; align-items: center; flex-shrink: 0; min-height: 48px; z-index: 10; }
+        .top-header .page-title { font-size: 16px; font-weight: 600; color: #e2e8f0; }
+        .top-header .page-title small { color: #64748b; font-weight: 400; font-size: 11px; margin-left: 8px; }
+        .top-header .header-actions { display: flex; gap: 10px; align-items: center; }
+        .status-badge { padding: 3px 12px; border-radius: 14px; font-size: 9px; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase; }
+        .status-badge.idle { background: #1e293b; color: #94a3b8; border: 1px solid #334155; }
+        .status-badge.training { background: #b45309; color: #fef3c7; border: 1px solid #d97706; animation: pulse-glow 1.5s ease-in-out infinite; }
+        .status-badge.completed { background: #065f46; color: #d1fae5; border: 1px solid #059669; }
+        .status-badge.error { background: #991b1b; color: #fecaca; border: 1px solid #dc2626; }
+        .status-badge.stopped { background: #374151; color: #f3f4f6; border: 1px solid #6b7280; }
+        .status-badge.evaluated { background: #1e40af; color: #bfdbfe; border: 1px solid #3b82f6; }
+        @keyframes pulse-glow { 0%, 100% { box-shadow: 0 0 10px rgba(217,119,6,0.3); } 50% { box-shadow: 0 0 25px rgba(217,119,6,0.6); } }
+
+        /* REMOVED: .dashboard-stats — no longer needed */
+
+        /* ===== Workflow Tabs ===== */
+        .workflow-tabs { display: flex; background: #0f172a; border-bottom: 2px solid #1e293b; padding: 0 16px; flex-shrink: 0; gap: 2px; z-index: 10; }
+        .workflow-tab { padding: 8px 20px; font-size: 13px; font-weight: 600; color: #64748b; cursor: pointer; border-bottom: 3px solid transparent; transition: all 0.2s ease; background: transparent; border-top: none; border-left: none; border-right: none; }
+        .workflow-tab:hover { color: #e2e8f0; }
+        .workflow-tab.active { color: #4ecdc4; border-bottom-color: #4ecdc4; }
+        .workflow-tab .tab-icon { margin-right: 4px; }
+
+        /* ===== Content Panels ===== */
+        .workflow-content { flex: 1; display: flex; overflow: hidden; }
+        .workflow-panel { display: none; flex: 1; overflow: hidden; flex-direction: column; }
+        .workflow-panel.active { display: flex; }
+
+        /* ===== Train Panel Layout ===== */
+        .train-container { display: flex; flex: 1; overflow: hidden; height: 100%; flex-direction: row; }
+        .train-left { flex: 1; display: flex; flex-direction: column; background: #0f172a; min-width: 0; min-height: 0; }
+        .train-right {
+            width: 480px;
+            min-width: 480px;
+            background: #0a0e17;
+            padding: 12px 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            border-left: 2px solid #1e293b;
+            flex-shrink: 0;
+            overflow-y: auto;
+        }
+        .train-right::-webkit-scrollbar { width: 6px; }
+        .train-right::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+
+        /* Height constraint for map + controls */
+        #map, #mapPredict, #mapEval { flex: 1; min-height: 200px; background: #0a0e17; width: 100%; height: 100%; }
+
+        /* ===== UI Components ===== */
+        .map-controls { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 12px; background: #0f172a; border-top: 2px solid #1e293b; flex-shrink: 0; align-items: center; min-height: 40px; z-index: 10; }
+        .map-controls .divider { width: 1px; height: 24px; background: #1e293b; margin: 0 6px; }
+        .map-controls .service-group { display: flex; align-items: center; gap: 4px; background: #1e293b; padding: 2px 8px; border-radius: 4px; border: 1px solid #334155; }
+        .map-controls .service-group label { font-size: 10px; color: #94a3b8; font-weight: 600; margin-right: 2px; }
+        .map-controls .service-group select { background: #0a0e17; border: none; color: #e2e8f0; padding: 2px 6px; border-radius: 3px; font-size: 10px; font-weight: 500; cursor: pointer; outline: none; }
+        .search-container { display: flex; align-items: center; gap: 4px; background: #1e293b; border: 1px solid #334155; border-radius: 4px; padding: 1px 6px; flex: 1; max-width: 320px; }
+        .search-container input { background: transparent; border: none; color: #e2e8f0; padding: 4px 6px; font-size: 12px; outline: none; width: 100%; }
+        .search-container input::placeholder { color: #64748b; }
+        .search-container .btn { height: 24px; padding: 0 8px; font-size: 10px; }
+
+        /* Buttons */
+        .btn { padding: 4px 12px; border: none; border-radius: 4px; cursor: pointer; font-size: 11px; font-weight: 600; transition: all 0.2s ease; display: inline-flex; align-items: center; gap: 5px; height: 26px; }
+        .btn:hover { transform: translateY(-1px); filter: brightness(1.15); box-shadow: 0 4px 12px rgba(0,0,0,0.3); }
+        .btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+        .btn-primary { background: #1283eb; color: white; }
+        .btn-success { background: #059669; color: white; }
+        .btn-danger { background: #dc2626; color: white; }
+        .btn-warning { background: #d97706; color: white; }
+        .btn-info { background: #0891b2; color: white; }
+        .btn-secondary { background: #374151; color: #e2e8f0; }
+        .btn-delete { background: #b91c1c; color: white; }
+        .btn-dataset { background: #8b5cf6; color: white; }
+        .btn-sm { padding: 3px 8px; font-size: 10px; height: 22px; }
+        .btn-xs { padding: 2px 6px; font-size: 9px; height: 18px; border-radius: 3px; }
+        .btn-folder { background: #1283eb; color: white; padding: 3px 8px; border: none; border-radius: 3px; cursor: pointer; font-size: 10px; height: 22px; display: inline-flex; align-items: center; gap: 4px; }
+
+        /* Status Bar */
+        .status-bar { display: flex; justify-content: space-between; padding: 4px 12px; background: #0f172a; border-top: 1px solid #1e293b; font-size: 10px; color: #64748b; flex-shrink: 0; flex-wrap: wrap; gap: 6px; min-height: 26px; align-items: center; z-index: 10; }
+        .status-bar .status-text { color: #94a3b8; }
+        .status-bar .info-item { display: flex; align-items: center; gap: 4px; }
+        .status-bar .info-item .label { color: #475569; }
+        .status-bar .info-item .value { color: #94a3b8; font-weight: 500; }
+
+        /* Config Sections */
+        .config-section { background: #0f172a; border: 1px solid #1e293b; border-radius: 6px; padding: 10px 12px; flex-shrink: 0; }
+        .config-section .section-title { font-size: 11px; text-transform: uppercase; color: #cbd5e1; font-weight: 700; letter-spacing: 0.5px; margin-bottom: 6px; }
+        .config-section .section-title .step-badge { background: #4ecdc4; color: #0a0e17; padding: 0 8px; border-radius: 10px; font-size: 10px; margin-right: 6px; }
+        .config-section .section-title .step-badge.run-badge { background: #f59e0b; }
+        .config-section .section-title .step-badge.eval-badge { background: #a78bfa; }
+
+        /* Config Rows (Dropdowns, Inputs) */
+        .config-row { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+        .config-row label { font-size: 11px; color: #94a3b8; min-width: 50px; font-weight: 500; }
+        .config-row input, .config-row select { flex: 1; background: #0a0e17; border: 1px solid #334155; color: #e2e8f0; padding: 4px 8px; border-radius: 4px; font-size: 12px; outline: none; height: 28px; min-width: 0; }
+        .config-row input:focus, .config-row select:focus { border-color: #4ecdc4; }
+        .config-row .btn { height: 28px; font-size: 11px; padding: 0 10px; }
+        .config-row.is-muted label, .config-row.is-muted select { opacity: 0.45; pointer-events: none; }
+
+        /* Project Info */
+        .project-info { background: #0a0e17; border: 1px solid #1e293b; border-radius: 4px; padding: 8px 10px; font-size: 11px; color: #94a3b8; }
+        .project-info .label { color: #64748b; }
+        .project-info .value { color: #e2e8f0; font-weight: 500; }
+
+        /* Run Progress */
+        .run-progress { background: #0a0e17; border: 1px solid #1e293b; border-radius: 4px; padding: 6px 8px; margin-top: 4px; }
+        .run-progress .progress-header { display: flex; justify-content: space-between; font-size: 10px; color: #94a3b8; margin-bottom: 4px; }
+        .run-progress .progress-header .time { color: #4ecdc4; font-weight: 600; }
+        .run-progress .progress-bar { background: #1e293b; border-radius: 3px; height: 6px; overflow: hidden; }
+        .run-progress .progress-bar .fill { height: 100%; background: linear-gradient(90deg, #4ecdc4, #0891b2); border-radius: 3px; transition: width 0.4s ease; width: 0%; }
+        .run-progress .progress-stats { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 4px; margin-top: 6px; }
+        .run-progress .progress-stats .stat { font-size: 9px; color: #64748b; text-align: center; background: #0f172a; padding: 4px; border-radius: 3px; }
+        .run-progress .progress-stats .stat .val { color: #4ecdc4; font-weight: 600; display: block; font-size: 12px; }
+        .run-progress .progress-stats .stat .val.best { color: #fbbf24; }
+        .run-progress .progress-stats .stat .val.loss { color: #f87171; }
+        .run-status { font-size: 10px; color: #64748b; text-align: center; margin-top: 4px; }
+
+        /* Chart */
+        .loss-chart-container { background: #0a0e17; border: 1px solid #1e293b; border-radius: 4px; padding: 4px; margin-top: 6px; height: 160px; min-height: 160px; position: relative; flex-shrink: 0; }
+        .loss-chart-container canvas { width: 100% !important; height: 100% !important; }
+        .loss-chart-container .chart-label { position: absolute; top: 4px; left: 6px; font-size: 10px; color: #94a3b8; text-transform: uppercase; }
+
+        /* Log Console */
+        .log-console { background: #0f172a; border-radius: 4px; padding: 4px 8px; flex-shrink: 0; max-height: 80px; display: flex; flex-direction: column; border: 1px solid #1e293b; }
+        .log-header { display: flex; justify-content: space-between; align-items: center; font-size: 10px; color: #64748b; padding-bottom: 4px; border-bottom: 1px solid #1e293b; flex-shrink: 0; font-weight: 700; }
+        .log-content { flex: 1; overflow-y: auto; font-size: 10px; font-family: 'Courier New', monospace; padding: 2px 0; max-height: 60px; min-height: 24px; }
+        .log-content::-webkit-scrollbar { width: 4px; }
+        .log-content::-webkit-scrollbar-thumb { background: #334155; border-radius: 2px; }
+        .log-entry { padding: 2px 0; border-bottom: 1px solid #0a0e17; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .log-entry .time { color: #475569; margin-right: 4px; font-size: 9px; }
+        .log-entry.log-info { color: #94a3b8; }
+        .log-entry.log-success { color: #34d399; }
+        .log-entry.log-warning { color: #fbbf24; }
+        .log-entry.log-error { color: #f87171; }
+
+        /* ===== Eval Panel Layout ===== */
+        .eval-container { display: flex; flex: 1; overflow: hidden; flex-direction: row; }
+        .eval-left { flex: 1; display: flex; flex-direction: column; background: #0f172a; min-width: 0; min-height: 0; position: relative; }
+        .eval-right { width: 440px; min-width: 440px; background: #0a0e17; padding: 12px 16px; overflow-y: auto; border-left: 2px solid #1e293b; flex-shrink: 0; display: flex; flex-direction: column; gap: 10px; }
+        .eval-right::-webkit-scrollbar { width: 6px; }
+        .eval-right::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+        
+        .eval-metrics-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+        .eval-metric-card { background: #0a0e17; border: 1px solid #1e293b; border-radius: 6px; padding: 12px; text-align: center; }
+        .eval-metric-card .label { font-size: 10px; text-transform: uppercase; color: #64748b; letter-spacing: 0.5px; }
+        .eval-metric-card .value { font-size: 24px; font-weight: 700; color: #4ecdc4; font-family: 'Courier New', monospace; margin-top: 4px; }
+        .eval-overlay-toggle { position: absolute; top: 12px; left: 12px; z-index: 500; background: rgba(15,23,42,0.92); border: 1px solid #1e293b; border-radius: 6px; padding: 8px 12px; font-size: 12px; display: flex; gap: 10px; align-items: center; }
+        .eval-overlay-toggle input[type=range] { width: 100px; }
+
+        /* ===== Predict Panel Layout ===== */
+        .predict-container { display: flex; flex: 1; overflow: hidden; flex-direction: row; }
+        .predict-left { flex: 1; display: flex; flex-direction: column; background: #0f172a; min-width: 0; min-height: 0; }
+        .predict-right { width: 400px; min-width: 400px; background: #0a0e17; padding: 12px 16px; overflow-y: auto; border-left: 2px solid #1e293b; flex-shrink: 0; display: flex; flex-direction: column; gap: 10px; }
+        .predict-right::-webkit-scrollbar { width: 6px; }
+        .predict-right::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+
+        /* ===== Datasets View (Full Width) ===== */
+        .datasets-view { display: none; flex: 1; padding: 20px 24px; overflow-y: auto; background: #0f172a; }
+        .datasets-view.active { display: block; }
+        .datasets-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; flex-wrap: wrap; gap: 10px; padding-bottom: 12px; border-bottom: 1px solid #1e293b; }
+        .datasets-header h3 { font-size: 20px; font-weight: 600; color: #e2e8f0; }
+        .datasets-header h3 i { color: #4ecdc4; margin-right: 8px; }
+        .datasets-header .breadcrumb { font-size: 12px; color: #64748b; }
+        .datasets-header .breadcrumb span { color: #4ecdc4; }
+        .dashboard-cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 24px; }
+        .dash-card { background: #0f172a; border: 1px solid #1e293b; border-radius: 10px; padding: 20px; text-align: center; }
+        .dash-card .card-icon { font-size: 28px; margin-bottom: 8px; }
+        .dash-card .card-label { font-size: 11px; color: #64748b; text-transform: uppercase; font-weight: 600; letter-spacing: 0.5px; }
+        .dash-card .card-value { font-size: 28px; font-weight: 700; color: #4ecdc4; margin-top: 4px; font-family: 'Courier New', monospace; }
+
+        .table-wrapper { background: #0f172a; border: 1px solid #1e293b; border-radius: 10px; overflow: hidden; overflow-x: auto; }
+        table { width: 100%; border-collapse: collapse; min-width: 700px; }
+        table thead { background: #0a0e17; border-bottom: 2px solid #1e293b; }
+        table th { padding: 12px 16px; text-align: left; font-size: 10px; text-transform: uppercase; color: #64748b; font-weight: 700; letter-spacing: 0.5px; }
+        table td { padding: 12px 16px; font-size: 12px; color: #94a3b8; border-bottom: 1px solid #1e293b; }
+        table tbody tr:hover { background: #1a1a2e; }
+        table td strong { color: #e2e8f0; }
+
+        .empty-state { text-align: center; padding: 60px 20px; color: #64748b; }
+        .empty-state .icon { font-size: 48px; color: #1e293b; display: block; margin-bottom: 16px; }
+        .empty-state .title { font-size: 18px; color: #94a3b8; margin-bottom: 8px; }
+
+        /* Grid Cards (Projects, Models) */
+        .project-card, .model-card { background: #0f172a; border: 1px solid #1e293b; border-radius: 8px; padding: 16px; display: flex; flex-direction: column; }
+        .project-card .project-header, .model-card .model-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px; }
+        .project-card .project-header h4, .model-card .model-header h4 { color: #e2e8f0; font-size: 14px; }
+        .project-card .project-details, .model-card .model-details { font-size: 11px; color: #94a3b8; margin-bottom: 8px; display: flex; flex-wrap: wrap; gap: 12px; }
+        .project-card .project-details .label, .model-card .model-details .label { color: #64748b; }
+        .project-card .project-actions, .model-card .model-actions { display: flex; gap: 6px; border-top: 1px solid #1e293b; padding-top: 8px; margin-top: auto; }
+        .project-card .project-actions .btn, .model-card .model-actions .btn { flex: 1; justify-content: center; font-size: 10px; height: 26px; }
+        .projects-grid, .models-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 16px; }
+
+        /* Upload Section */
+        .upload-section { background: #0f172a; border: 1px solid #1e293b; border-radius: 10px; padding: 20px; margin-top: 20px; }
+        .upload-section h4 { font-size: 14px; color: #e2e8f0; margin-bottom: 12px; }
+        .upload-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+        .upload-box { background: #0a0e17; border: 2px dashed #1e293b; border-radius: 8px; padding: 24px; text-align: center; cursor: pointer; }
+        .upload-box:hover { border-color: #4ecdc4; }
+        .upload-box .icon { font-size: 32px; color: #4ecdc4; margin-bottom: 8px; }
+        .upload-box h5 { font-size: 13px; color: #e2e8f0; margin-bottom: 4px; }
+        .upload-box p { font-size: 11px; color: #64748b; }
+
+        /* Modals */
+        .modal-overlay { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0, 0, 0, 0.75); backdrop-filter: blur(8px); z-index: 9999; justify-content: center; align-items: center; }
+        .modal-overlay.active { display: flex; }
+        .modal { background: linear-gradient(145deg, #0f1724, #1a2332); border: 1px solid #2d3748; border-radius: 16px; padding: 0; max-width: 560px; width: 92%; max-height: 90vh; overflow-y: auto; box-shadow: 0 25px 60px rgba(0, 0, 0, 0.8); }
+        .modal-header { display: flex; justify-content: space-between; align-items: center; padding: 20px 24px 16px 24px; border-bottom: 1px solid #2d3748; background: rgba(15, 23, 36, 0.6); border-radius: 16px 16px 0 0; }
+        .modal-title { font-size: 20px; font-weight: 600; color: #e2e8f0; display: flex; align-items: center; gap: 10px; }
+        .modal-title i { color: #4ecdc4; font-size: 22px; }
+        .modal-close { background: transparent; border: none; color: #64748b; font-size: 24px; cursor: pointer; padding: 4px 8px; border-radius: 6px; line-height: 1; }
+        .modal-close:hover { background: #2d3748; color: #e2e8f0; }
+        .modal-body { padding: 20px 24px 16px 24px; }
+        .form-group { margin-bottom: 18px; }
+        .form-label { display: block; font-size: 13px; font-weight: 500; color: #94a3b8; margin-bottom: 5px; }
+        .form-label .required { color: #f87171; margin-left: 2px; }
+        .form-input, .form-select, .form-textarea { width: 100%; padding: 10px 14px; background: #0a0e17; border: 1px solid #2d3748; border-radius: 8px; color: #e2e8f0; font-size: 14px; outline: none; font-family: inherit; }
+        .form-input:focus, .form-select:focus, .form-textarea:focus { border-color: #4ecdc4; }
+        .form-textarea { resize: vertical; min-height: 80px; }
+        .form-hint { font-size: 11px; color: #64748b; margin-top: 4px; }
+        .modal-footer { display: flex; justify-content: flex-end; gap: 10px; padding: 16px 24px 20px 24px; border-top: 1px solid #2d3748; background: rgba(15, 23, 36, 0.4); border-radius: 0 0 16px 16px; }
+        .btn-cancel { background: transparent; border: 1px solid #2d3748; color: #94a3b8; padding: 8px 20px; border-radius: 8px; cursor: pointer; font-size: 13px; }
+        .btn-cancel:hover { background: #1e293b; color: #e2e8f0; }
+        .btn-create { background: linear-gradient(135deg, #059669, #10b981); border: none; color: white; padding: 8px 24px; border-radius: 8px; cursor: pointer; font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 6px; }
+        .btn-create:hover { transform: translateY(-2px); box-shadow: 0 8px 25px rgba(5, 150, 105, 0.4); }
+
+        /* Leaflet Customizations */
+        .leaflet-container { background: #0a0e17 !important; }
+        .leaflet-control-zoom a { background: #1e293b !important; color: #e2e8f0 !important; border-color: #2d3748 !important; }
+        .leaflet-control-attribution { background: rgba(15, 23, 42, 0.85) !important; color: #64748b !important; font-size: 7px !important; }
+        .leaflet-popup-content-wrapper { background: rgba(15, 23, 42, 0.97) !important; border: 1px solid #4ecdc4 !important; color: #e2e8f0 !important; box-shadow: 0 4px 16px rgba(0,0,0,0.6) !important; }
+        .leaflet-popup-content { color: #e2e8f0 !important; font-size: 12px !important; margin: 8px 10px !important; background: transparent !important; }
+        .leaflet-popup-tip { background: rgba(15, 23, 42, 0.97) !important; border: 1px solid #4ecdc4 !important; }
+        .leaflet-popup-close-button { color: #94a3b8 !important; }
+        .leaflet-popup-close-button:hover { color: #4ecdc4 !important; }
+        .leaflet-draw-toolbar a { background-color: #fff !important; color: #333 !important; border: 1px solid #ccc !important; }
+        
+        /* Annotation Selection Toolbar */
+        #annotationSelectionToolbar { position: absolute; z-index: 1000; left: 12px; bottom: 58px; display: flex; gap: 6px; padding: 6px; border: 1px solid #334155; border-radius: 8px; background: rgba(15,23,42,.94); box-shadow: 0 4px 16px rgba(0,0,0,.35); }
+        #annotationSelectionToolbar button { border: 0; border-radius: 5px; padding: 7px 10px; color: #cbd5e1; background: #263449; font-size: 11px; cursor: pointer; }
+        #annotationSelectionToolbar button:hover { background: #0e7490; color: white; }
+        #annotationSelectionToolbar.has-selection { border-color: #fbbf24; }
+        #annotationSelectionToolbar.has-selection button:first-child { background: #92400e; color: #fff7ed; }
+    </style>
+</head>
+<body data-user="{{ current_user }}" data-role="{{ current_role }}" data-role-title="{{ current_role_title }}" data-capabilities="{{ capabilities }}">
+    <div class="app-container">
+        <!-- SIDEBAR -->
+        <nav class="sidebar">
+            <div class="sidebar-brand">
+                <svg class="brand-logo" viewBox="0 0 40 40" fill="none" role="img" aria-label="Braein.ai">
+                    <defs><linearGradient id="brandMark" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#4ecdc4"/><stop offset="1" stop-color="#0891b2"/></linearGradient></defs>
+                    <rect x="1.5" y="1.5" width="37" height="37" rx="10" stroke="url(#brandMark)" stroke-width="1.6" fill="rgba(78,205,196,.08)"/>
+                    <path d="M20 9l10 5.6-10 5.6-10-5.6L20 9z" stroke="url(#brandMark)" stroke-width="1.7" stroke-linejoin="round" fill="none"/>
+                    <path d="M10 20.5l10 5.6 10-5.6" stroke="url(#brandMark)" stroke-width="1.7" stroke-linejoin="round" stroke-linecap="round" fill="none"/>
+                    <path d="M10 26.4l10 5.6 10-5.6" stroke="url(#brandMark)" stroke-width="1.7" stroke-linejoin="round" stroke-linecap="round" fill="none" opacity=".55"/>
+                </svg>
+                <div class="brand-text"><h2>Braein.ai</h2><small>Comprehensive GeoAI Platform</small></div>
+            </div>
+            <div class="sidebar-user">
+                <i class="fas fa-user-circle"></i>
+                <div class="sidebar-user-text"><strong>{{ current_user }}</strong><small>{{ current_role_title }}</small></div>
+                <a href="/logout" class="sidebar-logout" title="Sign out"><i class="fas fa-sign-out-alt"></i></a>
+            </div>
+            <div class="sidebar-menu">
+                <div class="menu-section"><div class="menu-section-title">DASHBOARD</div><button class="menu-item active" onclick="showDashboard()"><i class="fas fa-th-large"></i><span>Dashboard</span></button></div>
+                <div class="menu-section">
+                    <div class="menu-section-title">DATASETS</div>
+                    <button class="menu-item" onclick="showPublicDatasets()"><i class="fas fa-database"></i><span>Public Dataset</span><span class="badge" id="publicBadge">6</span></button>
+                    <button class="menu-item" onclick="showUploadedDatasets()"><i class="fas fa-upload"></i><span>Uploaded</span><span class="badge" id="uploadedBadge">0</span></button>
+                    <button class="menu-item" onclick="showPurchasedDatasets()"><i class="fas fa-shopping-cart"></i><span>Purchased</span></button>
+                </div>
+                <div class="menu-section"><div class="menu-section-title">PROJECTS</div><button class="menu-item" onclick="showProjects()"><i class="fas fa-folder"></i><span>Projects</span><span class="badge" id="projectBadge">0</span></button></div>
+                <div class="menu-section"><div class="menu-section-title">ANALYSIS</div><button class="menu-item" onclick="showDownload()"><i class="fas fa-download"></i><span>Download GIS</span></button></div>
+                <div class="menu-section"><div class="menu-section-title">MODELS</div><button class="menu-item" onclick="showModels()"><i class="fas fa-robot"></i><span>Your Models</span><span class="badge" id="modelBadge2">0</span></button></div>
+            </div>
+            <div class="sidebar-footer"><i class="fas fa-circle" style="color:#4ecdc4;font-size:6px;"></i> System Ready<br><span id="footerTime"></span></div>
+        </nav>
+
+        <!-- MAIN CONTENT -->
+        <div class="main-content">
+			<header class="top-header">
+				<div class="page-title"><span id="pageTitle">Dashboard</span><small id="pageSubtitle">Home / Dashboard</small></div>
+				<div class="header-actions">
+					<span class="status-badge" id="basemapResidencyBadge" ...>BASEMAP ?</span>
+					<span class="inference-time" id="inferenceTime">⏱️ 00:00:00</span>
+					<span class="status-badge idle" id="statusBadge">IDLE</span>
+				</div>
+			</header>
+
+            <!-- Removed Dashboard Stats bar entirely to save vertical space -->
+
+            <div class="workflow-tabs" id="workflowTabs">
+                <button class="workflow-tab active" data-panel="train" onclick="switchWorkflow('train')"><i class="fas fa-play tab-icon"></i> TRAIN</button>
+                <button class="workflow-tab" data-panel="evaluate" onclick="switchWorkflow('evaluate')"><i class="fas fa-chart-bar tab-icon"></i> EVALUATE</button>
+                <button class="workflow-tab" data-panel="predict" onclick="switchWorkflow('predict')"><i class="fas fa-search tab-icon"></i> PREDICT</button>
+                <button class="workflow-tab" data-panel="finetune" onclick="switchWorkflow('finetune')"><i class="fas fa-layer-group tab-icon"></i> FINE TUNE</button>
+            </div>
+
+            <div class="workflow-content">
+                <!-- TRAIN PANEL -->
+                <div class="workflow-panel active" id="panel-train">
+                    <div class="train-container">
+                        <div class="train-left">
+                            <div id="map"></div>
+                            <div class="map-controls">
+                                <div class="search-container"><i class="fas fa-search" style="color:#64748b;font-size:10px;"></i><input type="text" id="searchInput" placeholder="Search places..." onkeydown="if(event.key==='Enter') searchLocation()"><button class="btn btn-info btn-xs" onclick="searchLocation()">Go</button></div>
+                                <div class="divider"></div>
+                                <div class="service-group"><label>🗺️</label><select id="mapServiceSelect"><option value="">Loading...</option></select></div>
+                                <div class="divider"></div>
+                                <button class="btn btn-success btn-sm" onclick="showCreateProject()"><i class="fas fa-plus"></i> New Project</button>
+                            </div>
+                            <div class="status-bar">
+                                <span class="status-text" id="statusText">✅ Select a project and start drawing</span>
+                                <span class="info-item"><span class="label">Objects:</span><span class="value" id="objectCount">0</span></span>
+                                <span class="info-item"><span class="label">Label:</span><span class="value" id="activeLabelDisplay">—</span></span>
+                                <span class="info-item"><span class="label">Zoom:</span><span class="value" id="zoomDisplay">12</span></span>
+                            </div>
+                        </div>
+                        <div class="train-right">
+                            <!-- 1. PROJECT -->
+                            <div class="config-section" style="border-left: 3px solid #4ecdc4;">
+                                <div class="section-title"><span class="step-badge">1</span> PROJECT</div>
+                                <div class="config-row">
+                                    <label>Project:</label>
+                                    <select id="projectSelect" style="flex:1;"><option value="">-- Select Project --</option></select>
+                                    <button class="btn btn-success btn-xs" onclick="showCreateProject()">New</button>
+                                </div>
+                                <div id="projectInfo" class="project-info" style="display:none;margin-top:6px;">
+                                    <div style="display:flex;justify-content:space-between;"><span><span class="label">Name:</span> <span class="value" id="projectName">—</span></span><span><span class="label">Labels:</span> <span class="value" id="projectLabels">—</span></span></div>
+                                    <div style="display:flex;justify-content:space-between;margin-top:4px;"><span><span class="label">Annotations:</span> <span class="value" id="projectAnnCount">0</span></span><span><span class="label">Chips:</span> <span class="value" id="projectChipCount">0</span></span></div>
+                                </div>
+                            </div>
+                            
+                            <!-- 2. LABEL -->
+                            <div class="config-section" style="border-left: 3px solid #8b5cf6;">
+                                <div class="section-title"><span class="step-badge">2</span> LABEL</div>
+                                <div class="config-row">
+                                    <label style="min-width:50px;">Active:</label>
+                                    <select id="labelDropdown" style="flex:1;"><option value="">-- Select --</option><option value="__new__">＋ New Label…</option></select>
+                                </div>
+                                <div class="config-row">
+                                    <label style="min-width:50px;">Or type:</label>
+                                    <input type="text" id="objectLabel" placeholder="Enter label name" value="" style="flex:1;">
+                                    <button class="btn btn-success btn-xs" onclick="createNewLabel(document.getElementById('objectLabel').value.trim())">Set</button>
+                                </div>
+                            </div>
+                            
+                            <!-- 3. ANNOTATE -->
+                            <div class="config-section" style="border-left: 3px solid #f59e0b;">
+                                <div class="section-title"><span class="step-badge">3</span> ANNOTATE</div>
+                                <div style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:6px;">
+                                    <button class="btn btn-sm btn-secondary" onclick="setAOI('current')"><i class="fas fa-location-crosshairs"></i> View</button>
+                                    <button class="btn btn-sm btn-info" onclick="setAOI('draw')"><i class="fas fa-pen"></i> Draw</button>
+                                    <button class="btn btn-sm btn-success" onclick="saveAnnotations()"><i class="fas fa-save"></i> Save</button>
+                                    <button class="btn btn-sm btn-secondary" onclick="loadAnnotations()"><i class="fas fa-folder-open"></i> Load</button>
+                                    <button class="btn btn-sm btn-delete" onclick="deleteSelectedShape()"><i class="fas fa-trash"></i> Del</button>
+                                    <button class="btn btn-sm btn-danger" onclick="clearAll()"><i class="fas fa-eraser"></i> Clear</button>
+                                    <button class="btn btn-sm btn-dataset" onclick="mergeAllLabels()" title="Merge all labels into one layer"><i class="fas fa-layer-group"></i> Merge</button>
+                                </div>
+                                <div style="font-size:10px;color:#64748b;margin-top:4px;text-align:center;"><span id="annotationStatus">Draw shapes on the map to annotate objects</span></div>
+                            </div>
+
+                            <!-- 4. DATASET -->
+                            <div class="config-section" style="border-left: 3px solid #8b5cf6;">
+                                <div class="section-title"><span class="step-badge">4</span> DATASET</div>
+                                <div class="config-row">
+                                    <label>Tile:</label><input type="number" id="tileSize" value="64" min="64" max="1024" style="width:60px;">
+                                    <label style="min-width:auto;">Overlap:</label><input type="number" id="tileOverlap" value="0.2" step="0.05" min="0" max="0.5" style="width:60px;">
+                                    <button class="btn btn-dataset btn-xs" onclick="buildDataset()"><i class="fas fa-database"></i> Build</button>
+                                </div>
+                                <div id="datasetStatus" style="font-size:10px;color:#64748b;text-align:center;">Not built yet</div>
+                                <div id="chipPreviewContainer"></div>
+                            </div>
+
+                            <!-- 5. TRAIN / FINE TUNE -->
+                            <div class="config-section" style="border-left: 3px solid #f59e0b;">
+                                <div class="section-title"><span class="step-badge run-badge">5</span> <span id="step5Title">TRAIN</span></div>
+                                <div id="fineTuneExistingModelRow" class="config-row" style="display:none;">
+                                    <label style="min-width:70px;">Existing model:</label>
+                                    <select id="fineTuneExistingModelSelect" style="flex:1;min-width:0;" onchange="selectFineTuneExistingModel(this.value)"><option value="">-- Select existing trained model --</option></select>
+                                    <button class="btn btn-secondary btn-xs" onclick="loadFineTuneModelChoices()" title="Refresh model list">↻</button>
+                                </div>
+                                <div id="fineTuneModelMeta" style="display:none;font-size:10px;color:#94a3b8;margin:4px 0 8px;"></div>
+                                <div class="config-row">
+                                    <label style="min-width:70px;">Model:</label>
+                                    <select id="modelTypeSelect" onchange="updateModelHint()">
+                                        <option value="unet" selected>U-Net (semantic)</option>
+                                        <option value="classic_cnn">Classic CNN</option>
+                                        <option value="rcnn">R-CNN</option>
+                                        <option value="fast_rcnn">Fast R-CNN</option>
+                                        <option value="mask_rcnn">Mask R-CNN</option>
+                                        <option value="yolo">YOLO</option>
+                                    </select>
+                                </div>
+                                <div class="model-hint" id="modelHint"><i class="fas fa-info-circle" style="color:#4ecdc4;"></i> U-Net runs standalone. Pick a backbone below only if you want auxiliary features at the bottleneck.</div>
+                                <div class="config-row" id="backboneRow">
+                                    <label style="min-width:70px;">Backbone:</label>
+                                    <select id="backboneSelect"><option value="unet" selected>None (standalone)</option><option value="resnet18">ResNet-18</option><option value="resnet34">ResNet-34</option><option value="resnet50">ResNet-50</option><option value="resnet101">ResNet-101</option><option value="mobilenet_v2">MobileNet-V2</option><option value="efficientnet_b0">EfficientNet-B0</option></select>
+                                </div>
+                                <div class="config-row">
+                                    <label style="min-width:70px;">Mode:</label>
+                                    <select id="modeSelect"><option value="binary" selected>Binary (background + 1 class)</option><option value="multiclass">Multi-class</option></select>
+                                </div>
+                                <div class="config-row">
+                                    <label style="min-width:70px;">Name:</label>
+                                    <input type="text" id="modelNameInput" placeholder="e.g. st_v1">
+                                </div>
+                                <div class="config-row">
+                                    <label style="min-width:50px;">Epochs:</label><input type="number" id="epochsInput" value="100" min="1" max="1000" style="width:60px;">
+                                    <label style="min-width:auto;">Batch:</label><input type="number" id="batchSize" value="2" min="1" max="32" style="width:50px;">
+                                    <label style="min-width:auto;">LR:</label><input type="number" id="lrInput" value="0.0001" step="0.00001" min="0.00001" max="0.1" style="width:80px;">
+                                </div>
+                                <div class="config-row">
+                                    <label style="min-width:50px;">Threshold:</label><input type="number" id="thresholdInput" value="0.5" step="0.05" min="0.05" max="0.95" style="width:60px;">
+                                    <button class="btn btn-success" id="trainBtn" onclick="startTrainingOrFineTune()" data-requires-capability="can_train" style="flex:1;font-size:11px;height:26px;"><i class="fas fa-play"></i> <span id="trainButtonText">TRAIN</span></button>
+                                    <button class="btn btn-danger" id="stopBtn" onclick="stopTraining()" style="display:none;flex:1;font-size:11px;height:26px;"><i class="fas fa-stop"></i> STOP</button>
+                                </div>
+                                <div style="margin-top:8px;">
+                                    <button class="btn btn-secondary btn-xs" onclick="toggleAdvanced()" id="advancedToggleBtn" style="width:100%;justify-content:center;"><i class="fas fa-sliders-h"></i> Advanced Regularisation ▾</button>
+                                    <div id="advancedPanel" style="display:none;margin-top:8px;padding:8px 10px;background:#0a0e17;border:1px solid #1e293b;border-radius:4px;">
+                                        <div class="config-row">
+                                            <label style="min-width:80px;">Weight Decay:</label><input type="number" id="weightDecayInput" value="0.0001" step="0.00001" min="0" max="0.1" style="width:80px;">
+                                            <label style="min-width:auto;">Dropout:</label><input type="number" id="dropoutInput" value="0.0" step="0.05" min="0" max="0.9" style="width:60px;">
+                                        </div>
+                                        <div class="config-row">
+                                            <label style="min-width:80px;">Grad Clip:</label><input type="number" id="gradClipInput" value="1.0" step="0.1" min="0" max="10" style="width:70px;">
+                                            <label style="min-width:auto;">Early Stop:</label><input type="number" id="earlyStopInput" value="15" step="1" min="0" max="200" style="width:60px;">
+                                        </div>
+                                        <div class="config-row">
+                                            <label style="min-width:80px;">Scheduler:</label><select id="schedulerSelect"><option value="plateau" selected>ReduceLROnPlateau</option><option value="cosine">CosineAnnealing</option><option value="step">StepLR</option><option value="none">None</option></select>
+                                        </div>
+                                        <div class="config-row">
+                                            <label style="min-width:80px;">Augment:</label><select id="augmentSelect"><option value="basic" selected>Flip / Rotate (basic)</option><option value="strong">Flip / Rotate / Color / Noise</option><option value="none">None</option></select>
+                                        </div>
+                                        <div id="modelRegHint" style="font-size:10px;color:#64748b;margin-top:6px;padding:6px 8px;background:#0f172a;border-radius:3px;"><i class="fas fa-lightbulb" style="color:#fbbf24;"></i> <span id="modelRegHintText">U-Net defaults: WD=1e-4, dropout=0.0, grad-clip=1.0. R-CNN family benefits from higher dropout (0.2–0.3).</span></div>
+                                    </div>
+                                </div>
+                                <div id="saveModelSection" style="display:none;margin-top:8px;padding:8px 10px;background:#0a0e17;border:1px solid #1e293b;border-radius:4px;border-left:3px solid #f59e0b;">
+                                    <div style="font-size:10px;color:#94a3b8;margin-bottom:6px;"><i class="fas fa-save" style="color:#4ecdc4;"></i> Save Trained Model</div>
+                                    <div class="config-row"><label style="min-width:50px;">Name:</label><input type="text" id="modelNameInputSave" placeholder="Enter model name..."></div>
+                                    <div class="config-row" id="saveLocationGroup">
+                                        <label style="min-width:50px;">Save to:</label>
+                                        <select id="saveLocationSelect" style="flex:1;"><option value="./models/saved">./models/saved</option><option value="custom">Custom…</option></select>
+                                        <button class="btn-folder" onclick="openFolderBrowser()"><i class="fas fa-folder-open"></i></button>
+                                        <button class="btn btn-success btn-xs" onclick="saveTrainedModel()" id="saveModelBtn">Save</button>
+                                    </div>
+                                    <div id="selectedFolderDisplay" style="font-size:10px;color:#64748b;text-align:center;display:none;">📁 <span id="selectedFolderPath">./models/saved</span></div>
+                                    <div id="saveModelStatus" style="font-size:10px;color:#64748b;text-align:center;margin-top:4px;">Waiting…</div>
+                                </div>
+                                <div class="run-progress" id="runProgress" style="display:none;">
+                                    <div class="progress-header"><span class="time" id="runTime">⏱️ 00:00:00</span><span id="runPercent">0%</span></div>
+                                    <div class="progress-bar"><div class="fill" id="progressFill"></div></div>
+                                    <div class="progress-stats">
+                                        <div class="stat">Epoch<br><span class="val" id="runEpoch">0/0</span></div>
+                                        <div class="stat">Loss<br><span class="val loss" id="runLoss">—</span></div>
+                                        <div class="stat"><span data-training-metric-label>IoU</span><br><span class="val" id="runIou">—</span></div>
+                                        <div class="stat">Best <span data-training-metric-label>IoU</span><br><span class="val best" id="runBest">—</span></div>
+                                    </div>
+                                    <div style="font-size:9px;color:#64748b;text-align:center;margin-top:4px;">Best epoch: <span id="runBestEpoch" style="color:#fbbf24;font-weight:600;">—</span></div>
+                                    <div class="loss-chart-container"><span class="chart-label">📈 Training Progress</span><canvas id="lossChart"></canvas></div>
+                                </div>
+                                <div class="run-status" id="runStatus">Ready</div>
+                            </div>
+                            
+                            <!-- Log Console -->
+                            <div class="log-console">
+                                <div class="log-header"><span>📋 Log</span><div><button onclick="clearCurrentLog()" class="btn btn-secondary btn-xs">Clear</button></div></div>
+                                <div id="logContent" class="log-content"><div class="log-entry log-info"><span class="time">[System]</span> Ready</div></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- EVALUATE PANEL -->
+                <div class="workflow-panel" id="panel-evaluate">
+                    <div class="eval-container">
+                        <div class="eval-left">
+                            <div id="mapEval"></div>
+                            <div class="eval-legend" style="position:absolute; bottom:50px; right:20px; z-index:500; background:rgba(15,23,42,0.92); border:1px solid #1e293b; border-radius:6px; padding:10px 14px; font-size:12px; color:#e2e8f0;">
+                                <div style="font-weight:700;color:#94a3b8;margin-bottom:6px;">LEGEND</div>
+                                <div><span style="display:inline-block;width:14px;height:14px;background:#60a5fa;opacity:0.6;border:1px solid #60a5fa;vertical-align:middle;margin-right:8px;"></span>Ground truth (blue)</div>
+                                <div><span style="display:inline-block;width:14px;height:14px;background:#f87171;opacity:0.6;border:1px solid #f87171;vertical-align:middle;margin-right:8px;"></span>Model prediction (red)</div>
+                            </div>
+                            <div class="eval-overlay-toggle"><span style="color:#94a3b8;"><i class="fas fa-eye"></i> Opacity</span><input type="range" min="0" max="100" value="60" oninput="document.querySelectorAll('.eval-image-overlay').forEach(function(el){ try { el.setStyle && el.setStyle({opacity:this.value/100}); } catch(e){} })"></div>
+                            <div class="map-controls">
+                                <div class="search-container"><i class="fas fa-search" style="color:#64748b;font-size:10px;"></i><input type="text" id="evalSearchInput" placeholder="Search places..." onkeydown="if(event.key==='Enter') searchEvalLocation()"><button class="btn btn-info btn-xs" onclick="searchEvalLocation()">Go</button></div>
+                                <div class="divider"></div>
+                                <button class="btn btn-info btn-sm" onclick="evaluateModel()" style="background:#4ecdc4;color:#0a0e17;"><i class="fas fa-play"></i> Evaluate</button>
+                                <button class="btn btn-warning btn-sm" onclick="showLoadModelDialog()"><i class="fas fa-upload"></i> Load Model</button>
+                                <button class="btn btn-danger btn-sm" onclick="clearEvaluationMetrics()"><i class="fas fa-eraser"></i> Clear</button>
+                                <span id="evalStatus" style="font-size:11px;color:#64748b;margin-left:auto;">Load a model or train first</span>
+                            </div>
+                            <div class="status-bar">
+                                <span class="status-text" id="evalStatusText">Ready to evaluate</span>
+                                <span class="info-item"><span class="label">Samples:</span><span class="value" id="evalSamples">0</span></span>
+                            </div>
+                        </div>
+                        <div class="eval-right">
+                            <div class="config-section" style="border-left: 3px solid #a78bfa;">
+                                <div class="section-title"><span class="step-badge eval-badge">📊</span> MODEL PERFORMANCE</div>
+                                <div class="eval-metrics-grid">
+                                    <div class="eval-metric-card"><div class="label">Mean IoU</div><div class="value" id="evalMap">—</div></div>
+                                    <div class="eval-metric-card"><div class="label">F1 Score</div><div class="value" id="evalF1">—</div></div>
+                                    <div class="eval-metric-card"><div class="label">Recall</div><div class="value" id="evalRecall">—</div></div>
+                                    <div class="eval-metric-card"><div class="label">Precision</div><div class="value" id="evalPrecision">—</div></div>
+                                </div>
+                            </div>
+                            
+                            <div class="config-section" id="modelExtraInfo" style="display:none;">
+                                <!-- Rich metadata from .dlpk will be injected here -->
+                            </div>
+
+                            <div class="config-section">
+                                <div class="section-title">📋 EVALUATION INFO</div>
+                                <div style="font-size:11px;color:#94a3b8;line-height:1.8;">
+                                    <div><span style="color:#64748b;">Project:</span> <span id="evalProjectName">—</span></div>
+                                    <div><span style="color:#64748b;">Model:</span> <span id="evalModelPath">—</span></div>
+                                    <div><span style="color:#64748b;">Samples:</span> <span id="evalSamples2">—</span></div>
+                                </div>
+                            </div>
+                            <div class="config-section">
+                                <div class="section-title">🔍 MODEL DETAILS</div>
+                                <div id="evalMetrics" style="font-size:11px;color:#94a3b8;line-height:1.8;"><p style="color:#64748b;">Run evaluation to see metrics</p></div>
+                            </div>
+                            <div class="log-console">
+                                <div class="log-header"><span>📋 Eval Log</span></div>
+                                <div id="evalLogContent" class="log-content"><div class="log-entry log-info"><span class="time">[System]</span> Ready</div></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- PREDICT PANEL -->
+                <div class="workflow-panel" id="panel-predict">
+                    <div class="predict-container">
+                        <div class="predict-left">
+                            <div id="mapPredict"></div>
+                            <div class="map-controls">
+                                <div class="search-container"><i class="fas fa-search" style="color:#64748b;font-size:10px;"></i><input type="text" id="predictSearchInput" placeholder="Search any region on Earth..." onkeydown="if(event.key==='Enter') searchPredictLocation()"><button class="btn btn-info btn-xs" onclick="searchPredictLocation()">Go</button></div>
+                                <div class="divider"></div>
+                                <button class="btn btn-warning btn-sm" onclick="runPrediction()" style="background:#d97706;color:white;"><i class="fas fa-search"></i> PREDICT</button>
+                                <button class="btn btn-info btn-sm" onclick="runBatchPredict()" style="background:#0891b2;color:white;"><i class="fas fa-folder-open"></i> Batch Predict</button>
+                                <button class="btn btn-info btn-sm" onclick="showLoadModelDialog()" style="background:#8b5cf6;color:white;"><i class="fas fa-upload"></i> Load Model</button>
+                                <button class="btn btn-secondary btn-sm" onclick="clearPrediction()"><i class="fas fa-eraser"></i> Clear</button>
+                                <span style="font-size:11px;color:#64748b;margin-left:auto;" id="predictStatus">Ready</span>
+                            </div>
+                            <div class="status-bar">
+                                <span class="status-text" id="predictStatusText">Pan to any region, or draw an AOI</span>
+                                <span class="info-item"><span class="label">Objects:</span><span class="value" id="predictObjectCount">0</span></span>
+                                <span class="info-item"><span class="label">Threshold:</span><span class="value" id="predictThresholdDisplay">0.5</span></span>
+                            </div>
+                        </div>
+                        <div class="predict-right">
+                            <div class="config-section">
+                                <div class="section-title">⚙️ PREDICTION SETTINGS</div>
+                                <div class="config-row">
+                                    <label>Threshold:</label>
+                                    <input type="range" id="predictThreshold" min="0.05" max="0.95" step="0.05" value="0.5">
+                                    <span id="predictThresholdVal" style="color:#4ecdc4;font-weight:700;min-width:30px;font-size:11px;">0.5</span>
+                                </div>
+                                <div class="config-row">
+                                    <label>Min Area:</label>
+                                    <input type="number" id="predictMinArea" value="20" min="5" max="500" style="width:60px;">
+                                </div>
+                                <details style="margin-top:8px;font-size:11px;color:#cbd5e1;">
+                                    <summary style="cursor:pointer;color:#93c5fd;font-weight:600;">Advanced post-processing</summary>
+                                    <div class="config-row" style="margin-top:8px;">
+                                        <label>Boundary smoothing:</label>
+                                        <input type="range" id="predictSmoothSigma" min="0" max="1.5" step="0.1" value="0.6" style="max-width:100px;">
+                                        <span id="predictSmoothSigmaVal" style="min-width:24px;">0.6</span>
+                                    </div>
+                                    <div class="config-row">
+                                        <label>Polygon simplification:</label>
+                                        <input type="number" id="predictSimplifyTolerance" value="0.008" min="0.002" max="0.03" step="0.001" style="width:70px;">
+                                    </div>
+                                    <div class="config-row" style="align-items:center;">
+                                        <label for="predictMorphClose">Morphological closing (3×3):</label>
+                                        <input type="checkbox" id="predictMorphClose">
+                                    </div>
+                                    <div style="font-size:10px;color:#94a3b8;line-height:1.45;margin-top:6px;">Closing is off by default because it can join nearby objects. Enable only to repair small gaps.</div>
+                                </details>
+                            </div>
+                            <div class="config-section">
+                                <div class="section-title">📍 REGION MODE</div>
+                                <div style="font-size:11px;color:#94a3b8;line-height:1.7;">By default, PREDICT runs on the <strong>current map view</strong>.<br>Draw a polygon on the map to restrict to a specific AOI.</div>
+                            </div>
+                            <div class="config-section">
+                                <div class="section-title">📊 DETECTION RESULTS</div>
+                                <div id="predictResults" style="font-size:11px;color:#94a3b8;max-height:160px;overflow-y:auto;"><p style="color:#64748b;">No predictions yet</p></div>
+                            </div>
+                            <div class="config-section">
+                                <div class="section-title">📥 EXPORT</div>
+                                <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                                    <button class="btn btn-success btn-sm" onclick="exportGeoJSON()" style="flex:1;"><i class="fas fa-file-code"></i> GeoJSON</button>
+                                    <button class="btn btn-info btn-sm" onclick="exportShapefile()" style="flex:1;"><i class="fas fa-file-shape"></i> Shapefile</button>
+                                </div>
+                                <button class="btn btn-secondary btn-sm" onclick="downloadShapefile()" id="predictShpBtn" style="display:none;margin-top:6px;width:100%;">📥 Download SHP</button>
+                            </div>
+                            <div class="log-console">
+                                <div class="log-header"><span>📋 Predict Log</span></div>
+                                <div id="predictLogContent" class="log-content"><div class="log-entry log-info"><span class="time">[System]</span> Ready</div></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- FINETUNE PANEL -->
+                <div class="workflow-panel" id="panel-finetune" style="overflow:auto;padding:18px;">
+                    <div style="max-width:900px;margin:0 auto;width:100%;">
+                        <h2><i class="fas fa-layer-group"></i> Fine-tune an existing model</h2>
+                        <p style="color:#94a3b8;line-height:1.6;">Fine Tune uses the same five-step project workflow as Train. Create a separate project for the new area, prepare its labels and annotations, build its dataset, then select a compatible existing trained model in Step 5. The original checkpoint is retained; fine-tuning produces a separate checkpoint.</p>
+                        <button class="btn btn-info" onclick="switchWorkflow('finetune')"><i class="fas fa-arrow-right"></i> Open five-step Fine Tune workflow</button>
+                        <p style="font-size:11px;color:#fbbf24;margin-top:12px;">Use a distinct project and label key for the new area. Dataset folders in this application are currently label-scoped, not fully project-scoped; do not reuse an existing label name until project-scoped storage is implemented.</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- DASHBOARD VIEW -->
+            <div class="datasets-view active" id="dashboardView">
+                <div class="datasets-header"><div><h3><i class="fas fa-th-large"></i> Dashboard</h3><div class="breadcrumb">Home / <span>Dashboard</span></div></div></div>
+                <div class="dashboard-cards">
+                    <div class="dash-card"><div class="card-icon" style="color:#4ecdc4;"><i class="fas fa-globe"></i></div><div class="card-label">Map Services</div><div class="card-value" id="dashMapServices2">6</div></div>
+                    <div class="dash-card"><div class="card-icon" style="color:#a78bfa;"><i class="fas fa-tags"></i></div><div class="card-label">Annotations</div><div class="card-value" id="dashAnnotations2">0</div></div>
+                    <div class="dash-card"><div class="card-icon" style="color:#fbbf24;"><i class="fas fa-th"></i></div><div class="card-label">Training Chips</div><div class="card-value" id="dashChips2">0</div></div>
+                    <div class="dash-card"><div class="card-icon" style="color:#34d399;"><i class="fas fa-robot"></i></div><div class="card-label">Saved Models</div><div class="card-value" id="dashModels2">0</div></div>
+                </div>
+            </div>
+
+            <!-- PROJECTS VIEW -->
+            <div class="datasets-view" id="projectsView">
+                <div class="datasets-header"><div><h3><i class="fas fa-folder"></i> My Projects</h3><div class="breadcrumb">Home / <span>Projects</span></div></div><div style="display:flex;gap:8px;"><button class="btn btn-success btn-sm" onclick="showCreateProject()"><i class="fas fa-plus"></i> New Project</button><button class="btn btn-info btn-sm" onclick="loadProjects()"><i class="fas fa-sync"></i> Refresh</button></div></div>
+                <div id="projectsList" class="projects-grid"></div>
+            </div>
+
+            <!-- MODELS VIEW -->
+            <div class="datasets-view" id="yourModelsView">
+                <div class="datasets-header">
+                    <div><h3><i class="fas fa-robot"></i> Your Models</h3><div class="breadcrumb">Home / <span>Models</span></div></div>
+                    <div style="display:flex;gap:8px;align-items:center;">
+                        <input type="file" id="dlpkImportInput" accept=".dlpk,.zip" style="display:none;" onchange="importDlpk(this)">
+                        <button class="btn btn-secondary btn-sm" data-requires-capability="can_train" onclick="document.getElementById('dlpkImportInput').click()"><i class="fas fa-file-import"></i> Import .dlpk</button>
+                        <button class="btn btn-info btn-sm" onclick="loadModels()"><i class="fas fa-sync"></i> Refresh</button>
+                    </div>
+                </div>
+                <div class="dashboard-cards">
+                    <div class="dash-card"><div class="card-icon" style="color:#4ecdc4;"><i class="fas fa-robot"></i></div><div class="card-label">Total Models</div><div class="card-value" id="modelsTotal">0</div></div>
+                    <div class="dash-card"><div class="card-icon" style="color:#a78bfa;"><i class="fas fa-check-circle"></i></div><div class="card-label">Trained</div><div class="card-value" id="modelsTrained">0</div></div>
+                    <div class="dash-card"><div class="card-icon" style="color:#fbbf24;"><i class="fas fa-chart-line"></i></div><div class="card-label">Best IoU</div><div class="card-value" id="modelsBestIoU">0.00</div></div>
+                    <div class="dash-card"><div class="card-icon" style="color:#34d399;"><i class="fas fa-database"></i></div><div class="card-label">Total Size</div><div class="card-value" id="modelsSize">0 MB</div></div>
+                </div>
+                <div id="yourModelsList" class="models-grid"></div>
+            </div>
+
+            <!-- OTHER VIEWS -->
+            <div class="datasets-view" id="publicDatasetsView">
+                <div class="datasets-header"><div><h3><i class="fas fa-database"></i> Public Datasets</h3><div class="breadcrumb">Datasets / <span>Public</span></div></div><button class="btn btn-info btn-sm" onclick="refreshPublicDatasets()"><i class="fas fa-sync"></i> Refresh</button></div>
+                <div class="table-wrapper"><table><thead><tr><th>#</th><th>Name</th><th>Resolution</th><th>Type</th><th>Max Zoom</th><th>Attribution</th><th>Action</th></tr></thead><tbody id="publicDatasetsBody"></tbody></table></div>
+                <div style="margin-top:12px;font-size:12px;color:#64748b;" id="publicDatasetsCount">—</div>
+            </div>
+            <div class="datasets-view" id="uploadedDatasetsView">
+                <div class="datasets-header"><div><h3><i class="fas fa-upload"></i> Uploaded Datasets</h3><div class="breadcrumb">Datasets / <span>Uploaded</span></div></div><button class="btn btn-info btn-sm" onclick="loadUploadedDatasets()"><i class="fas fa-sync"></i> Refresh</button></div>
+                <div class="table-wrapper"><table><thead><tr><th>#</th><th>Session</th><th>Date</th><th>Size</th><th>Files</th><th>Type</th><th>Action</th></tr></thead><tbody id="uploadedDatasetsBody"></tbody></table></div>
+                <div class="upload-section"><h4><i class="fas fa-cloud-upload-alt" style="color:#4ecdc4;"></i> Upload New Dataset</h4><div class="upload-grid"><div class="upload-box" onclick="document.getElementById('folderInput').click()"><div class="icon"><i class="fas fa-folder-open"></i></div><h5>Upload Folder</h5><input type="file" id="folderInput" webkitdirectory directory multiple style="display:none;"></div><div class="upload-box" onclick="document.getElementById('zipInput').click()"><div class="icon"><i class="fas fa-file-archive"></i></div><h5>Upload ZIP</h5><input type="file" id="zipInput" accept=".zip,.rar,.7z" style="display:none;"></div></div></div>
+            </div>
+            <div class="datasets-view" id="purchasedDatasetsView">
+                <div class="datasets-header"><div><h3><i class="fas fa-shopping-cart"></i> Purchased Datasets</h3><div class="breadcrumb">Datasets / <span>Purchased</span></div></div></div>
+                <div class="table-wrapper"><table><thead><tr><th>#</th><th>Name</th><th>Date</th><th>Size</th><th>Files</th><th>Action</th></tr></thead><tbody id="purchasedDatasetsBody"><tr><td colspan="6"><div class="empty-state"><span class="icon"><i class="fas fa-shopping-bag"></i></span><div class="title">No Purchased Datasets</div></div></td></tr></tbody></table></div>
+            </div>
+            <div class="datasets-view" id="downloadView">
+                <div class="datasets-header"><div><h3><i class="fas fa-download"></i> Download GIS Analysis</h3><div class="breadcrumb">Home / <span>Download</span></div></div></div>
+                <div class="dashboard-cards">
+                    <div class="dash-card"><div class="card-icon" style="color:#4ecdc4;"><i class="fas fa-file-alt"></i></div><div class="card-label">GeoJSON</div><div class="card-value" style="font-size:16px;" id="downloadGeoJSON">—</div></div>
+                    <div class="dash-card"><div class="card-icon" style="color:#fbbf24;"><i class="fas fa-file-shape"></i></div><div class="card-label">Shapefile</div><div class="card-value" style="font-size:16px;" id="downloadSHP">—</div></div>
+                    <div class="dash-card"><div class="card-icon" style="color:#a78bfa;"><i class="fas fa-objects"></i></div><div class="card-label">Objects</div><div class="card-value" id="downloadObjects">0</div></div>
+                    <div class="dash-card"><div class="card-icon" style="color:#34d399;"><i class="fas fa-check-circle"></i></div><div class="card-label">Status</div><div class="card-value" style="font-size:16px;color:#64748b;" id="downloadStatus">—</div></div>
+                </div>
+                <div style="background:#0f172a;border:1px solid #1e293b;border-radius:10px;padding:24px;text-align:center;"><div id="downloadLinks" style="display:flex;gap:12px;justify-content:center;flex-wrap:wrap;"></div></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- MODALS -->
+    <div class="modal-overlay" id="createProjectModal">
+        <div class="modal">
+            <div class="modal-header"><h2 class="modal-title"><i class="fas fa-folder-plus"></i> Create New Project</h2><button class="modal-close" onclick="closeCreateProject()">&times;</button></div>
+            <div class="modal-body">
+                <div class="form-group"><label class="form-label">Project Name <span class="required">*</span></label><input type="text" id="modalProjectName" class="form-input" placeholder="e.g. Storage Tanks Dubai" value="Storage Tanks"></div>
+                <div class="form-group"><label class="form-label">Task Type</label><select id="modalTaskType" class="form-select"><option value="Image Segmentation" selected>Image Segmentation</option><option value="Object Detection">Object Detection</option></select></div>
+                <div class="form-group"><label class="form-label">Dataset Type</label><select id="modalDatasetType" class="form-select"><option value="Optical Satellite Imagery" selected>Optical Satellite Imagery</option><option value="SAR Satellite Imagery">SAR Satellite Imagery</option><option value="Aerial Imagery">Aerial Imagery</option></select></div>
+                <div class="form-group"><label class="form-label">Model Type</label><select id="modalModelType" class="form-select"><option value="U-Net" data-model-key="unet" selected>U-Net (semantic segmentation)</option><option value="Classic CNN" data-model-key="classic_cnn">Classic CNN (classification)</option><option value="R-CNN" data-model-key="rcnn">R-CNN (object detection)</option><option value="Fast R-CNN" data-model-key="fast_rcnn">Fast R-CNN (object detection)</option><option value="Mask R-CNN" data-model-key="mask_rcnn">Mask R-CNN (instance segmentation)</option><option value="YOLO" data-model-key="yolo">YOLO (object detection)</option></select><div class="form-hint">You can still change this later in Step 5 — the project just remembers your default.</div></div>
+                <div class="form-group"><label class="form-label">Labels (comma-separated)</label><input type="text" id="modalLabels" class="form-input" value="st"><div class="form-hint">First label = primary class. You can add more later.</div></div>
+                <div class="form-group"><label class="form-label">Description</label><textarea id="modalDescription" class="form-textarea" rows="2">Object detection from satellite imagery</textarea></div>
+            </div>
+            <div id="createProjectBusy" class="create-project-busy" style="display:none;"><i class="fas fa-spinner fa-spin"></i><span>Creating project…</span></div>
+            <div class="modal-footer"><button class="btn-cancel" onclick="closeCreateProject()">Cancel</button><button class="btn-create" id="createProjectBtn" onclick="createProjectFromNewModal()"><i class="fas fa-plus-circle"></i> Create Project</button></div>
+        </div>
+    </div>
+
+    <div class="modal-overlay" id="annotationModal">
+        <div class="modal" style="max-width: 750px;">
+            <div class="modal-header"><h2 class="modal-title"><i class="fas fa-list"></i> Select Annotation File</h2><button class="modal-close" onclick="closeAnnotationModal()">&times;</button></div>
+            <div class="modal-body">
+                <div style="display:flex;gap:8px;margin-bottom:12px;"><input type="text" id="annotationSearchInput" placeholder="Search…" style="flex:1;background:#0a0e17;border:1px solid #2d3748;color:#e2e8f0;padding:6px 10px;border-radius:4px;font-size:11px;"><button class="btn btn-info btn-sm" onclick="refreshAnnotationModalList()"><i class="fas fa-sync"></i></button></div>
+                <div id="annotationModalList" style="max-height:400px;overflow-y:auto;border:1px solid #1e293b;border-radius:6px;background:#0a0e17;"></div>
+                <div id="selectedAnnotationInfo" style="margin-top:10px;padding:8px 12px;background:#0a0e17;border-radius:4px;border:1px solid #1e293b;display:none;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+                        <div><span style="color:#64748b;font-size:10px;">File:</span> <span id="selectedAnnName" style="color:#4ecdc4;font-size:11px;">—</span></div>
+                        <div><span style="color:#64748b;font-size:10px;">Features:</span> <span id="selectedAnnCount" style="color:#e2e8f0;">0</span></div>
+                        <div><span style="color:#64748b;font-size:10px;">Label:</span> <span id="selectedAnnLabel" style="color:#fbbf24;">—</span></div>
+                        <button class="btn btn-success btn-sm" onclick="loadSelectedAnnotationFromModal()"><i class="fas fa-arrow-right"></i> Load & Zoom</button>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer"><button class="btn-cancel" onclick="closeAnnotationModal()">Close</button></div>
+        </div>
+    </div>
+
+    <div class="modal-overlay" id="modelSelectModal">
+        <div class="modal" style="max-width: 600px;">
+            <div class="modal-header"><h2 class="modal-title"><i class="fas fa-robot"></i> Load Trained Model</h2><button class="modal-close" onclick="document.getElementById('modelSelectModal').classList.remove('active')">&times;</button></div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label class="form-label">Choose a model</label>
+                    <select id="modelSelect" class="form-select" style="background:#0a0e17;color:#e2e8f0;padding:10px;border-radius:8px;border:1px solid #2d3748;font-size:12px;"><option value="">-- Select --</option></select>
+                </div>
+                <div id="modelSelectHint" style="font-size:11px;color:#64748b;margin-top:8px;">Models from <code>labels/*/models/*.pth</code></div>
+                <div id="modelSelectStatus" style="font-size:11px;color:#94a3b8;margin-top:6px;"></div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn-cancel" onclick="document.getElementById('modelSelectModal').classList.remove('active')">Close</button>
+                <button class="btn-create" id="modalLoadModelBtn" onclick="loadModelFromModalDropdown()"><i class="fas fa-upload"></i> Load Selected Model</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/app.js?v=dlpk-ws-fix-20261109b"></script>
+</body>
+</html>

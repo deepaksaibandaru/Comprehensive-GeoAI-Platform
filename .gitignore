@@ -1,0 +1,80 @@
+# ==========================================
+# Comprehensive GeoAI Platform .gitignore
+# ==========================================
+
+# Byte-compiled / cache files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+
+# Local Environment & Secrets
+.env
+.env.*
+!.env.example
+users.json
+
+# Backup files
+*.orig
+*.pre-*
+appp.py
+prediction_1794461177514*
+
+# Model weights & binaries (>100MB)
+*.pth
+*.pt
+*.dlpk
+*.onnx
+*.ckpt
+*.h5
+*.pb
+*.tflite
+models/checkpoints/
+models/dlpk/
+labels/*/models/
+
+# Runtime directories: keep folder structure via .gitkeep, ignore contents
+models/saved/*
+!models/saved/.gitkeep
+
+models/dlpk_imported/*
+!models/dlpk_imported/.gitkeep
+
+models/imported/*
+!models/imported/.gitkeep
+
+models/torch_home/*
+!models/torch_home/.gitkeep
+
+labels/*
+!labels/.gitkeep
+
+uploads/*
+!uploads/.gitkeep
+
+annotations/*
+!annotations/.gitkeep
+
+out/
+prediction_shp/
+*.tif
+*.tiff
+*.zip
+
+# Giant GeoJSON dumps and chip directories
+projects/*/annotations/
+projects/*/chips/
+
+# OS / Editor artifacts
+.DS_Store
+Thumbs.db
+ehthumbs.db
+.idea/
+.vscode/
+*.swp
+*.tmp
+
+# Logs
+*.log
+training.log

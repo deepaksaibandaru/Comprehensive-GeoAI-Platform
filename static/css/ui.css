@@ -1,0 +1,361 @@
+/* ===================================================================
+   ui.css - UI normalisation layer for index.html        (2026-11-03)
+   -------------------------------------------------------------------
+   Loaded AFTER the inline <style> in index.html so it wins on equal
+   specificity. Kept as its own file so every original rule stays
+   readable and this is revertible by deleting one <link>.
+
+   It fixes three MEASURED problems, not matters of taste:
+
+   1. FOUR text fonts rendered at once. Counted on the live page:
+        Segoe UI        479 elements   (intended)
+        Arial           140 elements   (form controls do NOT inherit
+                                        font-family - the usual cause of
+                                        "the fonts look different")
+        Helvetica Neue  114 elements   (Leaflet's own stylesheet sets it
+                                        and it cascades into map controls)
+        Courier New + Lucida Console   (two different mono stacks)
+
+   2. ELEVEN button colour classes with no semantic meaning. The
+      annotate row alone had 7 buttons in 6 colours, so nothing read as
+      the primary action and red did not mean "destructive".
+
+   3. Text as small as 8px, below any legibility floor.
+
+   Not touched: templates/login.html, which is deliberately
+   self-contained and must not load anything from /static.
+   =================================================================== */
+
+:root {
+  --ui-font:   'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+  --ui-mono:   ui-monospace, 'Cascadia Mono', Consolas, 'Courier New', monospace;
+  --ui-accent: #4ecdc4;
+  --ui-accent-2: #0891b2;
+  --ui-surface: #0f172a;
+  --ui-sunken:  #0a0e17;
+  --ui-line:    #1e293b;
+  --ui-line-2:  #2b3a52;
+  --ui-text:    #e2e8f0;
+  --ui-muted:   #94a3b8;
+  --ui-danger:  #ef4444;
+  --ui-radius:  7px;
+  --ui-h:       28px;          /* one control height, everywhere */
+}
+
+/* ---- 1. ONE FONT --------------------------------------------------- */
+body,
+.leaflet-container,                      /* Leaflet hard-codes Helvetica Neue */
+input, select, textarea, button, optgroup, option {
+  font-family: var(--ui-font);
+}
+
+/* Icon fonts keep their own family, or every icon becomes a tofu box. */
+.fas, .fa-solid   { font-family: 'Font Awesome 6 Free'   !important; font-weight: 900; }
+.far, .fa-regular { font-family: 'Font Awesome 6 Free'   !important; font-weight: 400; }
+.fab, .fa-brands  { font-family: 'Font Awesome 6 Brands' !important; font-weight: 400; }
+
+code, pre, .log-area, .log-entry, .mono { font-family: var(--ui-mono); }
+
+/* ---- 2. LEGIBILITY FLOOR ------------------------------------------- */
+/* 8px helper text was in use in several panels. */
+[style*="font-size:8px"],  [style*="font-size: 8px"],
+[style*="font-size:9px"],  [style*="font-size: 9px"] {
+  font-size: 10.5px !important;
+  line-height: 1.45 !important;
+}
+
+/* ---- 3. ONE CONTROL SIZE ------------------------------------------- */
+input[type=text], input[type=number], input[type=password], select, textarea {
+  /* min-height, NEVER a fixed height.
+     ---------------------------------------------------------------
+     A fixed `height: 28px` here won against the modal's own rule, but
+     that modal ALSO sets `padding: 10px 14px` from a more specific
+     selector - and padding is a separate declaration, so it survived.
+     28px box - 20px vertical padding = 8px of content space for 14px
+     text, and with overflow:clip the selected option rendered as
+     nothing. The value was selected; it was invisible.
+
+     min-height + height:auto lets a control honour whatever padding
+     its own stylesheet sets and still never fall below the common
+     control height. box-sizing makes the two agree. */
+  box-sizing: border-box;
+  min-height: var(--ui-h);
+  height: auto;
+  line-height: 1.3;
+  padding: 0 8px;
+  background: var(--ui-sunken);
+  color: var(--ui-text);
+  border: 1px solid var(--ui-line);
+  border-radius: var(--ui-radius);
+  font-size: 12px;
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+input:hover, select:hover { border-color: var(--ui-line-2); }
+input:focus-visible, select:focus-visible, textarea:focus-visible {
+  outline: none;
+  border-color: var(--ui-accent);
+  box-shadow: 0 0 0 3px rgba(78, 205, 196, .25);
+}
+
+/* ---- 4. THREE BUTTON TIERS, NOT ELEVEN COLOURS --------------------- */
+.btn {
+  /* Same reasoning as the inputs above: a fixed height clips any button
+     whose own stylesheet sets vertical padding. */
+  box-sizing: border-box;
+  min-height: var(--ui-h);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 11px;
+  border: 1px solid var(--ui-line-2);
+  border-radius: var(--ui-radius);
+  background: #1b2740;
+  color: var(--ui-text);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background .15s ease, border-color .15s ease, filter .15s ease;
+}
+.btn:hover { background: #22304d; border-color: #38496b; }
+.btn:focus-visible { outline: none; box-shadow: 0 0 0 3px rgba(78, 205, 196, .25); }
+.btn i { font-size: 11px; }
+.btn-sm { min-height: 26px; padding: 0 10px; font-size: 11.5px; }
+.btn-xs { min-height: 24px; padding: 0  9px; font-size: 11px; }
+
+/* PRIMARY - the one action a panel exists to perform. */
+.btn-primary, .btn-create, .btn-success {
+  background: linear-gradient(135deg, var(--ui-accent), var(--ui-accent-2));
+  border-color: transparent;
+  color: #04121a;
+}
+.btn-primary:hover, .btn-create:hover, .btn-success:hover {
+  background: linear-gradient(135deg, var(--ui-accent), var(--ui-accent-2));
+  filter: brightness(1.08);
+}
+
+/* NEUTRAL - everything that is neither primary nor destructive. These
+   were info / dataset / folder / warning / secondary: five hues for a
+   distinction no user could learn. */
+.btn-secondary, .btn-info, .btn-dataset, .btn-folder, .btn-warning, .btn-cancel {
+  background: #1b2740;
+  border-color: var(--ui-line-2);
+  color: var(--ui-text);
+}
+.btn-secondary:hover, .btn-info:hover, .btn-dataset:hover,
+.btn-folder:hover, .btn-warning:hover, .btn-cancel:hover {
+  background: #22304d;
+  border-color: #38496b;
+}
+
+/* DESTRUCTIVE - red now means exactly one thing. */
+.btn-danger, .btn-delete {
+  background: transparent;
+  border-color: rgba(239, 68, 68, .45);
+  color: #fca5a5;
+}
+.btn-danger:hover, .btn-delete:hover {
+  background: rgba(239, 68, 68, .14);
+  border-color: var(--ui-danger);
+  color: #fecaca;
+}
+
+/* ---- 5. CALM THE CONFIG PANEL -------------------------------------- */
+/* Per-section coloured left rails (purple, amber, blue, green) competed
+   with the buttons for attention. One neutral rail; the numbered step
+   badge already carries the sequence. */
+.config-section {
+  border-left: 3px solid var(--ui-line) !important;
+  background: var(--ui-surface);
+  border-radius: var(--ui-radius);
+  padding: 10px 11px;
+  margin-bottom: 9px;
+}
+.config-section .section-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 9px;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: .7px;
+  text-transform: uppercase;
+  color: var(--ui-muted);
+}
+.step-badge {
+  flex-shrink: 0;
+  width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, var(--ui-accent), var(--ui-accent-2));
+  color: #04121a;
+  font-size: 10px;
+  font-weight: 700;
+}
+.config-row { display: flex; align-items: center; gap: 7px; margin-bottom: 7px; }
+.config-row label { font-size: 11.5px; font-weight: 600; color: var(--ui-muted); }
+
+/* Button rows were crowded at 3px. */
+.config-section > div[style*="display:flex"] { gap: 5px !important; }
+
+/* ---- 6. STAT CARDS -------------------------------------------------- */
+.stat-card, .stats-card {
+  background: var(--ui-surface);
+  border: 1px solid var(--ui-line);
+  border-radius: 10px;
+}
+/* The oversized saturated icons read as buttons. They are decoration. */
+.stat-card i, .stats-card i { opacity: .45; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    transition-duration: .01ms !important;
+    animation-duration: .01ms !important;
+  }
+}
+
+/* ===================================================================
+   7. STRAGGLERS - found by querying the live DOM, not by reading CSS
+   -------------------------------------------------------------------
+   After the rules above, a second measurement still showed two mono
+   stacks and 146 elements rendering below 10.4px, including BUTTONS
+   at 8px and status text at 7px. These are the named offenders.
+   =================================================================== */
+
+/* -- one monospace stack ------------------------------------------- */
+.inference-time, .stat-value, .log-content, .log-entry, .log-entry .time,
+.leaflet-control-zoom-in, .leaflet-control-zoom-out {
+  font-family: var(--ui-mono);
+}
+/* Numbers read better in the UI face; only true logs stay monospace. */
+.stat-value { font-family: var(--ui-font); font-variant-numeric: tabular-nums; }
+
+/* -- legibility floor, by selector --------------------------------- */
+/* Dense dashboard chrome, so the floor is 10.5px rather than the 12px
+   a body-text rule would use. Raising these further reflows the panel. */
+th,
+.menu-section-title,
+.config-section .section-title,
+span.label, span.value {
+  font-size: 10.5px !important;
+}
+
+/* Buttons were rendering as small as 8px - below the size at which a
+   control reads as a control. */
+.btn, .btn-sm { font-size: 11.5px !important; }
+.btn-xs       { font-size: 11px   !important; }
+
+/* Status and timestamp text was 7px. */
+.log-entry, .log-entry .time, .inference-time, #annotationStatus {
+  font-size: 10.5px !important;
+  line-height: 1.5;
+}
+
+/* The step badge sets its own size; keep the digit centred and legible. */
+.step-badge { font-size: 10px !important; }
+
+/* Anything still declaring a sub-10px size inline. */
+[style*="font-size:7px"], [style*="font-size: 7px"],
+[style*="font-size:8px"], [style*="font-size: 8px"],
+[style*="font-size:9px"], [style*="font-size: 9px"],
+[style*="font-size:10px"], [style*="font-size: 10px"] {
+  font-size: 10.5px !important;
+}
+
+/* -- 8. DASHBOARD STAT WIDGETS -------------------------------------- */
+/* The real class is .stat-widget (an earlier guess at .stat-card missed
+   it). Four 24px icons in four hues - teal, purple, amber, emerald -
+   at full opacity read as four buttons competing with the numbers they
+   decorate. The NUMBER is the content; the icon is a label. */
+.stat-widget {
+  background: var(--ui-surface);
+  border: 1px solid var(--ui-line);
+  border-radius: 10px;
+}
+.dashboard-stats i,
+.stat-widget i {
+  color: var(--ui-muted) !important;
+  opacity: .38;
+  font-size: 20px !important;
+}
+.stat-label {
+  font-size: 10.5px !important;
+  letter-spacing: .7px;
+  text-transform: uppercase;
+  color: var(--ui-muted);
+}
+.stat-value {
+  font-family: var(--ui-font);
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  color: var(--ui-text);
+}
+
+/* -- 9. NUMERIC READOUTS -------------------------------------------- */
+/* .stat-value / .value / .card-value were still resolving to
+   "Courier New" through a more specific rule in the inline stylesheet.
+   Courier New is a 1950s typewriter face and looked out of place at
+   24px beside Segoe UI. The UI face with tabular figures keeps the
+   column alignment that monospace was there to provide, without the
+   typeface clash. Needs !important to beat the inline rule. */
+.stat-value, .stat-value.models, .value, .card-value, .inference-time {
+  font-family: var(--ui-font) !important;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+}
+/* Genuine log output stays monospace - there, alignment is the point. */
+.log-content, .log-entry, .log-entry .time, pre, code {
+  font-family: var(--ui-mono) !important;
+}
+
+/* -- 10. OPTION SIZE FOLLOWS ITS SELECT ------------------------------ */
+/* Forcing every <option> to a flat 10.5px made the dropdown list text
+   smaller than the closed control it belonged to (the modal's selects
+   are 14px). max() keeps the legibility floor AND matches the parent:
+   1em here resolves against the select's own font-size. */
+option { font-size: max(10.5px, 1em); }
+
+/* ===================================================================
+   11. MAP TOOLS APPEAR WHEN THEY APPLY        (2026-11-04)
+   -------------------------------------------------------------------
+   Two toolbars were permanently on screen regardless of context:
+
+   a) The Leaflet.draw palette (polyline / polygon / rectangle / circle
+      / marker / circlemarker + edit + delete) sat on every map at all
+      times. The "Draw" button in step 3 did nothing but write a log
+      line - setAOI() was `addLog('info', ...)` and nothing else - so
+      the palette was never actually under the user's control.
+
+   b) The Edit / Delete / x selection bar was `display:flex` always,
+      offering two actions on nothing. It already received a
+      `.has-selection` class when a shape was picked; the CSS simply
+      never used it.
+
+   Both now appear only when they apply. Hiding is done with a class on
+   the map container rather than by removing the Leaflet control,
+   because L.Control.Draw's edit handler is bound to a featureGroup at
+   construction - removing and re-adding the control is how you end up
+   with an edit toolbar that silently edits nothing.
+   =================================================================== */
+
+/* (a) draw palette - shown only while the map is in draw mode */
+.leaflet-container:not(.geoai-draw-mode) .leaflet-draw.leaflet-control {
+  display: none;
+}
+
+/* (b) selection bar - shown only while a shape is selected */
+.annotation-selection-toolbar { display: none !important; }
+.annotation-selection-toolbar.has-selection { display: flex !important; }
+
+/* The active Draw button should look engaged, so the mode is visible
+   rather than something the user has to remember. */
+.btn.geoai-mode-on {
+  background: linear-gradient(135deg, var(--ui-accent), var(--ui-accent-2)) !important;
+  border-color: transparent !important;
+  color: #04121a !important;
+}

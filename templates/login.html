@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<!--
+  login.html - sign-in page for Braein.ai
+
+  Deliberately self-contained: no external stylesheet, no app.js, no
+  vendored library, NO WEBFONT. The sign-in page must render before the
+  user is authenticated, so anything it loads would have to be a public
+  path. Keeping it standalone means /static can be protected like
+  everything else, and there is one less unauthenticated surface.
+
+  That rule is also why the artwork is inline SVG rather than a basemap
+  tile or a hosted font: a request to fonts.googleapis.com on every
+  sign-in is the same data-residency finding IGA raised about Google
+  tiles, and it would leak a hit per login attempt.
+
+  Palette and type are taken from templates/index.html so the sign-in
+  page and the app are visibly one product (#0a0e17 / #0f172a / #1e293b,
+  accent #4ecdc4 -> #0891b2).
+-->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="dark">
+<title>Sign in &middot; Braein.ai</title>
+<style>
+  :root {
+    --bg:        #0a0e17;
+    --panel:     #0f172a;
+    --panel-2:   #111c33;
+    --border:    #1e293b;
+    --text:      #e2e8f0;
+    --muted:     #94a3b8;   /* 7:1 on --panel; #64748b fails at this size */
+    --faint:     #64748b;
+    --accent:    #4ecdc4;
+    --accent-2:  #0891b2;
+    --danger-bg: #2a1216; --danger-br: #7f1d1d; --danger-fg: #fca5a5;
+    --warn-bg:   #231b0c;  --warn-br:   #78531a; --warn-fg:   #fcd34d;
+    --radius:    14px;
+    --ring:      0 0 0 3px rgba(78,205,196,.30);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    min-height: 100vh;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.55 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .shell {
+    min-height: 100vh;
+    display: grid;
+    grid-template-columns: minmax(0, 1.25fr) minmax(380px, 0.75fr);
+  }
+
+  /* ---------------------------------------------------------------- *
+   *  Left: the geospatial scene.                                      *
+   *  Abstract on purpose - it reads as imagery under analysis without  *
+   *  claiming to be a map of anywhere. A wrong national outline on a   *
+   *  government portal is worse than no outline.                      *
+   * ---------------------------------------------------------------- */
+  .scene {
+    position: relative;
+    overflow: hidden;
+    background:
+      radial-gradient(120% 90% at 20% 15%, #12243d 0%, #0b1220 55%, #070b12 100%);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    padding: 40px;
+  }
+  .scene svg.map { position: absolute; inset: 0; width: 100%; height: 100%; }
+
+  .scene-top { position: relative; z-index: 2; display: flex; align-items: center; gap: 12px; }
+  .scene-top .mark { width: 34px; height: 34px; flex-shrink: 0; }
+  .scene-top b { font-size: 15px; font-weight: 600; letter-spacing: .2px; }
+  .scene-top span { display: block; font-size: 11px; color: var(--muted); letter-spacing: .4px; }
+
+  .scene-copy { position: relative; z-index: 2; max-width: 30ch; }
+  .scene-copy h2 {
+    font-size: clamp(24px, 2.4vw, 34px);
+    font-weight: 600; line-height: 1.25; letter-spacing: -.5px;
+  }
+  .scene-copy p { margin-top: 12px; color: var(--muted); font-size: 14px; }
+
+  .chips { position: relative; z-index: 2; display: flex; flex-wrap: wrap; gap: 8px; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 6px 11px; border-radius: 999px;
+    background: rgba(15,23,42,.72);
+    border: 1px solid var(--border);
+    font-size: 11.5px; color: var(--muted);
+    backdrop-filter: blur(6px);
+  }
+  .chip svg { width: 13px; height: 13px; flex-shrink: 0; }
+  .chip.live { color: var(--accent); border-color: rgba(78,205,196,.35); }
+
+  /* The sweep that reads as "imagery being processed". */
+  .sweep {
+    position: absolute; left: 0; right: 0; height: 190px; z-index: 1;
+    background: linear-gradient(180deg, transparent, rgba(78,205,196,.11) 60%, rgba(78,205,196,.26));
+    border-bottom: 1px solid rgba(78,205,196,.55);
+    animation: sweep 7s cubic-bezier(.4,0,.6,1) infinite;
+  }
+  @keyframes sweep {
+    0%   { transform: translateY(-190px); opacity: 0; }
+    12%  { opacity: 1; }
+    88%  { opacity: 1; }
+    100% { transform: translateY(100vh);  opacity: 0; }
+  }
+  .det { opacity: 0; animation: pop .5s ease forwards; }
+  @keyframes pop { from { opacity: 0; transform: scale(.94); } to { opacity: 1; transform: scale(1); } }
+
+  /* ---------------------------------------------------------------- *
+   *  Right: the form.                                                 *
+   * ---------------------------------------------------------------- */
+  .pane {
+    display: flex; align-items: center; justify-content: center;
+    padding: 40px 32px; background: var(--panel);
+  }
+  .card { width: 100%; max-width: 380px; }
+
+  .brand { margin-bottom: 28px; }
+  .brand h1 {
+    font-size: 26px; font-weight: 700; letter-spacing: -.4px;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent; color: var(--accent);
+  }
+  .brand p { margin-top: 5px; color: var(--muted); font-size: 13.5px; }
+
+  .field { margin-bottom: 16px; }
+  label {
+    display: block; margin-bottom: 7px;
+    font-size: 12.5px; font-weight: 600; letter-spacing: .2px; color: var(--text);
+  }
+  .control { position: relative; display: flex; align-items: center; }
+  .control > svg.lead {
+    position: absolute; left: 12px; width: 16px; height: 16px;
+    color: var(--faint); pointer-events: none;
+  }
+  input[type=text], input[type=password] {
+    width: 100%; height: 44px;              /* 44px min target */
+    padding: 0 12px 0 38px;
+    background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 9px;
+    font-size: 14px; font-family: inherit;
+    transition: border-color .18s ease, box-shadow .18s ease;
+  }
+  input::placeholder { color: #475569; }
+  input:hover { border-color: #2b3a52; }
+  input:focus-visible {
+    outline: none; border-color: var(--accent); box-shadow: var(--ring);
+  }
+  .reveal {
+    position: absolute; right: 4px;
+    width: 38px; height: 38px; display: grid; place-items: center;
+    background: none; border: 0; border-radius: 8px;
+    color: var(--faint); cursor: pointer;
+    transition: color .18s ease, background .18s ease;
+  }
+  .reveal:hover { color: var(--text); background: rgba(148,163,184,.1); }
+  .reveal:focus-visible { outline: none; color: var(--accent); box-shadow: var(--ring); }
+  .reveal svg { width: 17px; height: 17px; }
+
+  .hint {
+    display: none; align-items: center; gap: 6px;
+    margin-top: 7px; font-size: 12px; color: var(--warn-fg);
+  }
+  .hint.on { display: flex; }
+  .hint svg { width: 13px; height: 13px; flex-shrink: 0; }
+
+  button.submit {
+    width: 100%; height: 46px; margin-top: 6px;
+    border: 0; border-radius: 9px;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    color: #04121a; font-size: 14.5px; font-weight: 700;
+    font-family: inherit; letter-spacing: .2px; cursor: pointer;
+    display: inline-flex; align-items: center; justify-content: center; gap: 9px;
+    transition: filter .18s ease, transform .12s ease;
+  }
+  button.submit:hover { filter: brightness(1.08); }
+  button.submit:active { transform: translateY(1px); }
+  button.submit:focus-visible { outline: none; box-shadow: var(--ring); }
+  button.submit[aria-busy="true"] { filter: saturate(.55) brightness(.85); cursor: progress; }
+  .spinner { display: none; width: 15px; height: 15px; flex-shrink: 0; }
+  button.submit[aria-busy="true"] .spinner { display: block; animation: spin .7s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .msg {
+    display: flex; gap: 9px; align-items: flex-start;
+    padding: 11px 13px; border-radius: 9px;
+    font-size: 13px; margin-bottom: 18px; border: 1px solid;
+  }
+  .msg svg { width: 15px; height: 15px; flex-shrink: 0; margin-top: 2px; }
+  .err  { background: var(--danger-bg); border-color: var(--danger-br); color: var(--danger-fg); }
+  .warn { background: var(--warn-bg);   border-color: var(--warn-br);   color: var(--warn-fg); }
+
+  .foot {
+    margin-top: 26px; padding-top: 18px; border-top: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 12px; flex-wrap: wrap;
+    color: var(--muted); font-size: 11.5px;
+  }
+  .foot .secure { display: inline-flex; align-items: center; gap: 6px; }
+  .foot svg { width: 13px; height: 13px; flex-shrink: 0; }
+  code {
+    background: var(--bg); border: 1px solid var(--border);
+    padding: 1px 5px; border-radius: 5px; font-size: 12px;
+  }
+
+  /* Stack below the split-layout breakpoint; the scene becomes a header. */
+  @media (max-width: 920px) {
+    .shell { grid-template-columns: 1fr; }
+    .scene { min-height: 230px; padding: 24px; gap: 20px; border-right: 0; border-bottom: 1px solid var(--border); }
+    /* The scene is cropped hard at this width, so SVG labels can land under
+       the brand lockup. Push the artwork back rather than reflow it. */
+    .scene svg.map { opacity: .5; }
+    .scene-copy h2 { font-size: 21px; }
+    .scene-copy p, .chips { display: none; }
+    .pane { padding: 32px 20px 44px; }
+  }
+  @media (max-width: 380px) {
+    .pane { padding: 26px 16px 36px; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .sweep { animation: none; opacity: .18; transform: translateY(38vh); }
+    .det   { animation: none; opacity: 1; }
+    .spinner { animation: none; }
+    * { transition-duration: .01ms !important; }
+  }
+</style>
+</head>
+<body>
+<div class="shell">
+
+  <!-- ============================ scene ============================ -->
+  <section class="scene" aria-hidden="true">
+    <svg class="map" viewBox="0 0 800 900" preserveAspectRatio="xMidYMid slice" focusable="false">
+      <defs>
+        <pattern id="grat" width="64" height="64" patternUnits="userSpaceOnUse">
+          <path d="M64 0H0V64" fill="none" stroke="#1e3350" stroke-width="1" opacity=".55"/>
+        </pattern>
+        <linearGradient id="land" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0"   stop-color="#1b3350"/>
+          <stop offset="1"   stop-color="#122539"/>
+        </linearGradient>
+        <radialGradient id="glow" cx="50%" cy="50%" r="50%">
+          <stop offset="0" stop-color="#4ecdc4" stop-opacity=".16"/>
+          <stop offset="1" stop-color="#4ecdc4" stop-opacity="0"/>
+        </radialGradient>
+      </defs>
+
+      <rect width="800" height="900" fill="url(#grat)"/>
+      <circle cx="430" cy="400" r="300" fill="url(#glow)"/>
+
+      <!-- landmass / coastline -->
+      <path d="M150 640 C210 560 250 540 300 470 C345 405 330 330 380 270
+               C430 210 520 215 575 265 C640 325 640 420 600 492
+               C560 565 470 590 410 660 C360 720 250 740 190 712
+               C155 696 132 672 150 640 Z"
+            fill="url(#land)"/>
+      <path d="M150 640 C210 560 250 540 300 470 C345 405 330 330 380 270
+               C430 210 520 215 575 265 C640 325 640 420 600 492
+               C560 565 470 590 410 660 C360 720 250 740 190 712
+               C155 696 132 672 150 640 Z"
+            fill="none" stroke="#4ecdc4" stroke-width="1.4" opacity=".5"/>
+
+      <!-- contours -->
+      <g fill="none" stroke="#2f5578" stroke-width="1" opacity=".55">
+        <path d="M250 560 C300 505 325 455 365 405 C405 355 470 340 520 370"/>
+        <path d="M285 590 C335 540 360 486 400 440 C445 390 495 380 540 405"/>
+        <path d="M330 618 C380 572 405 520 448 478 C486 441 520 432 552 448"/>
+      </g>
+
+      <!-- AOI -->
+      <rect x="318" y="300" width="250" height="250" fill="none"
+            stroke="#4ecdc4" stroke-width="1.5" stroke-dasharray="7 6" opacity=".85"/>
+      <g stroke="#4ecdc4" stroke-width="2.5" fill="none">
+        <path d="M318 322V300h22"/><path d="M546 300h22v22"/>
+        <path d="M568 528v22h-22"/><path d="M340 550h-22v-22"/>
+      </g>
+
+      <!-- detections -->
+      <g stroke="#4ecdc4" fill="rgba(78,205,196,.13)" stroke-width="1.5">
+        <rect class="det" style="animation-delay:.5s"  x="352" y="338" width="40" height="26" rx="2"/>
+        <rect class="det" style="animation-delay:.8s"  x="420" y="330" width="34" height="30" rx="2"/>
+        <rect class="det" style="animation-delay:1.1s" x="482" y="352" width="44" height="24" rx="2"/>
+        <rect class="det" style="animation-delay:1.4s" x="366" y="420" width="38" height="28" rx="2"/>
+        <rect class="det" style="animation-delay:1.7s" x="446" y="438" width="46" height="26" rx="2"/>
+        <rect class="det" style="animation-delay:2.0s" x="500" y="470" width="36" height="30" rx="2"/>
+      </g>
+      <g font-family="'Segoe UI',sans-serif" font-size="9" fill="#4ecdc4" opacity=".9">
+        <text class="det" style="animation-delay:.5s"  x="352" y="333">0.94</text>
+        <text class="det" style="animation-delay:1.1s" x="482" y="347">0.91</text>
+        <text class="det" style="animation-delay:1.7s" x="446" y="433">0.88</text>
+      </g>
+
+      <!-- crosshair + readout: the probe point already in arcgis_service.py -->
+      <g stroke="#4ecdc4" stroke-width="1" opacity=".75">
+        <path d="M612 236h34M629 219v34"/>
+        <circle cx="629" cy="236" r="9" fill="none"/>
+      </g>
+      <text x="612" y="206" font-family="'Segoe UI',sans-serif" font-size="11"
+            fill="#94a3b8" letter-spacing=".5">26.2285&#176;N  50.5860&#176;E</text>
+    </svg>
+
+    <div class="sweep"></div>
+
+    <div class="scene-top">
+      <svg class="mark" viewBox="0 0 40 40" fill="none" focusable="false">
+        <defs>
+          <linearGradient id="bg1" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0" stop-color="#4ecdc4"/><stop offset="1" stop-color="#0891b2"/>
+          </linearGradient>
+        </defs>
+        <rect x="1.5" y="1.5" width="37" height="37" rx="10"
+              stroke="url(#bg1)" stroke-width="1.6" fill="rgba(78,205,196,.08)"/>
+        <path d="M20 9l10 5.6-10 5.6-10-5.6L20 9z" stroke="url(#bg1)" stroke-width="1.7"
+              stroke-linejoin="round" fill="none"/>
+        <path d="M10 20.5l10 5.6 10-5.6" stroke="url(#bg1)" stroke-width="1.7"
+              stroke-linejoin="round" stroke-linecap="round" fill="none"/>
+        <path d="M10 26.4l10 5.6 10-5.6" stroke="url(#bg1)" stroke-width="1.7"
+              stroke-linejoin="round" stroke-linecap="round" fill="none" opacity=".55"/>
+      </svg>
+      <div>
+        <b>Braein.ai</b>
+        <span>Comprehensive GeoAI Platform</span>
+      </div>
+    </div>
+
+    <div class="scene-copy">
+      <h2>Deep learning for geospatial imagery.</h2>
+      <p>Label, train and run inference on your own imagery &mdash; on your own
+         infrastructure, without the data leaving it.</p>
+    </div>
+
+    <div class="chips">
+      <span class="chip live">
+        <svg viewBox="0 0 16 16" fill="currentColor" focusable="false"><circle cx="8" cy="8" r="4"/></svg>
+        GPU training
+      </span>
+      <span class="chip">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" focusable="false">
+          <path d="M12 2a10 10 0 100 20 10 10 0 000-20zM2 12h20M12 2a15 15 0 010 20 15 15 0 010-20z"/>
+        </svg>
+        Self-hosted &middot; no external calls
+      </span>
+      <span class="chip">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" focusable="false">
+          <path d="M12 2l8 4v6c0 5-3.4 8.6-8 10-4.6-1.4-8-5-8-10V6l8-4z"/>
+        </svg>
+        ArcGIS &middot; .dlpk interchange
+      </span>
+    </div>
+  </section>
+
+  <!-- ============================ form ============================= -->
+  <main class="pane">
+    <div class="card">
+
+      <div class="brand">
+        <h1>Braein.ai</h1>
+        <p>{{ subtitle }}</p>
+      </div>
+
+      {% if error %}
+      <div class="msg err" role="alert">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" focusable="false">
+          <circle cx="12" cy="12" r="10"/><path d="M12 8v5M12 16.5v.01"/>
+        </svg>
+        <span>{{ error }}</span>
+      </div>
+      {% endif %}
+
+      {% if first_run_user %}
+      <div class="msg warn" role="status">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" focusable="false">
+          <path d="M12 3l9 16H3l9-16z"/><path d="M12 10v4M12 17v.01"/>
+        </svg>
+        <span>First run. An administrator account <code>{{ first_run_user }}</code> was
+          created and its password printed <strong>once</strong> in the server console.
+          Sign in and change it.</span>
+      </div>
+      {% endif %}
+
+      <form method="post" action="/login" autocomplete="on" id="signin">
+        <input type="hidden" name="next" value="{{ next_url }}">
+
+        <div class="field">
+          <label for="username">Username</label>
+          <div class="control">
+            <svg class="lead" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="2" focusable="false" aria-hidden="true">
+              <circle cx="12" cy="8" r="4"/><path d="M4 21v-1a7 7 0 0114 0v1"/>
+            </svg>
+            <input id="username" name="username" type="text" placeholder="your.name"
+                   autocomplete="username" required autofocus>
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="password">Password</label>
+          <div class="control">
+            <svg class="lead" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="2" focusable="false" aria-hidden="true">
+              <rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 018 0v3"/>
+            </svg>
+            <input id="password" name="password" type="password" placeholder="&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;"
+                   autocomplete="current-password" required>
+            <button type="button" class="reveal" id="reveal"
+                    aria-label="Show password" aria-pressed="false" aria-controls="password">
+              <svg id="eye" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                   stroke-width="2" focusable="false" aria-hidden="true">
+                <path d="M1.5 12S5 5.5 12 5.5 22.5 12 22.5 12 19 18.5 12 18.5 1.5 12 1.5 12z"/>
+                <circle cx="12" cy="12" r="3"/>
+              </svg>
+            </button>
+          </div>
+          <p class="hint" id="caps" role="status">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" focusable="false">
+              <path d="M12 4l7 7h-4v4H9v-4H5l7-7zM9 19h6"/>
+            </svg>
+            Caps Lock is on.
+          </p>
+        </div>
+
+        <button type="submit" class="submit" id="go">
+          <svg class="spinner" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               stroke-width="2.5" focusable="false" aria-hidden="true">
+            <path d="M12 2a10 10 0 010 20" stroke-linecap="round"/>
+          </svg>
+          <span id="golabel">Sign in</span>
+        </button>
+      </form>
+
+      <div class="foot">
+        <span class="secure">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" focusable="false" aria-hidden="true">
+            <rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 018 0v3"/>
+          </svg>
+          Session cookie &middot; HttpOnly
+        </span>
+        <span>{{ backend_note }}</span>
+      </div>
+
+    </div>
+  </main>
+</div>
+
+<script>
+  // Password reveal. aria-pressed carries the state for screen readers;
+  // the icon alone would be invisible to them.
+  var pw = document.getElementById('password'),
+      rv = document.getElementById('reveal'),
+      eye = document.getElementById('eye');
+  var EYE   = '<path d="M1.5 12S5 5.5 12 5.5 22.5 12 22.5 12 19 18.5 12 18.5 1.5 12 1.5 12z"/><circle cx="12" cy="12" r="3"/>';
+  var EYEOFF= '<path d="M3 3l18 18"/><path d="M10.6 6.1A9.8 9.8 0 0112 6c7 0 10.5 6 10.5 6a17 17 0 01-3.9 4.6M6.4 7.6A17 17 0 001.5 12S5 18 12 18a9.7 9.7 0 004-.85"/>';
+  rv.addEventListener('click', function () {
+    var show = pw.type === 'password';
+    pw.type = show ? 'text' : 'password';
+    rv.setAttribute('aria-pressed', show ? 'true' : 'false');
+    rv.setAttribute('aria-label', show ? 'Hide password' : 'Show password');
+    eye.innerHTML = show ? EYEOFF : EYE;
+    pw.focus();
+  });
+
+  // Caps Lock is the commonest cause of a "wrong password" that is not one.
+  var caps = document.getElementById('caps');
+  function capsCheck(e) {
+    if (typeof e.getModifierState !== 'function') return;
+    caps.classList.toggle('on', e.getModifierState('CapsLock'));
+  }
+  pw.addEventListener('keydown', capsCheck);
+  pw.addEventListener('keyup', capsCheck);
+  pw.addEventListener('blur', function () { caps.classList.remove('on'); });
+
+  // Submit feedback. Without it a slow PBKDF2 verify (600k iterations)
+  // looks like a dead button and invites a second click.
+  var form = document.getElementById('signin'),
+      go = document.getElementById('go'),
+      lbl = document.getElementById('golabel');
+  form.addEventListener('submit', function () {
+    go.setAttribute('aria-busy', 'true');
+    lbl.textContent = 'Signing in…';
+    setTimeout(function () { go.disabled = true; }, 0);   // after the POST is queued
+  });
+</script>
+</body>
+</html>

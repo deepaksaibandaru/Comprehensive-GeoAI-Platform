@@ -1,0 +1,68 @@
+# Braein.ai — Python dependencies
+# =============================================================================
+# Generated from a static scan of every import across app.py, models/ and
+# utils/. Produced because the IGA / NCSC review needs a licence inventory and
+# none could be produced without it.
+#
+# VERSIONS ARE NOT PINNED YET. Pin them from the machine that actually runs
+# this (`pip freeze`) before the review — an unpinned manifest will not pass a
+# supply-chain attestation.
+#
+# Licence column is the commonly distributed licence for each project.
+# Verify against the installed wheels before submitting to IGA.
+# =============================================================================
+
+# --- Web layer -----------------------------------------------------------
+fastapi                 # MIT
+uvicorn[standard]       # BSD-3-Clause
+python-multipart        # Apache-2.0   (required by FastAPI for file upload)
+jinja2                  # BSD-3-Clause (templates)
+
+# --- Deep learning -------------------------------------------------------
+torch                   # BSD-3-Clause
+torchvision             # BSD-3-Clause
+torchmetrics            # Apache-2.0
+
+# --- Imaging / arrays ----------------------------------------------------
+numpy                   # BSD-3-Clause
+pillow                  # MIT-CMU            (imported as PIL)
+opencv-python           # Apache-2.0  <-- SEE NOTE 1 (imported as cv2)
+matplotlib              # PSF-based (BSD-compatible)
+
+# --- Geospatial ----------------------------------------------------------
+rasterio                # BSD-3-Clause
+geopandas               # BSD-3-Clause
+shapely                 # BSD-3-Clause
+pyproj                  # MIT
+
+# --- HTTP ----------------------------------------------------------------
+requests                # Apache-2.0
+
+# =============================================================================
+# NOTE 1 — opencv-python licence variant
+# -----------------------------------------------------------------------------
+# PyPI opencv-python wheels bundle FFmpeg under LGPL-2.1+, and a GPL-enabled
+# build variant exists. Which one is installed cannot be determined from source.
+# Confirm on the deployment host before submitting the licence register:
+#     pip show opencv-python
+#     python -c "import cv2; print(cv2.getBuildInformation())"
+# opencv-python-headless avoids the GUI dependencies and is usually preferable
+# on a server.
+#
+# NOTE 2 — ultralytics (YOLO) is DELIBERATELY ABSENT
+# -----------------------------------------------------------------------------
+# ultralytics is AGPL-3.0. AGPL is network copyleft: serving software that
+# links it can oblige disclosure of this application's ENTIRE source to its
+# users. It is gated off by default in deployment_config.py (ENABLE_YOLO).
+#
+# Do NOT add it here without legal sign-off or a commercial Ultralytics
+# licence. If approved, add it to a separate requirements-yolo.txt so the
+# obligation stays visible and the default install remains clean.
+#
+# NOTE 3 — air-gapped deployment
+# -----------------------------------------------------------------------------
+# torchvision models are constructed with pretrained=True in twelve places,
+# which downloads weights from download.pytorch.org on first use. That fails in
+# an isolated deployment and is an undeclared outbound host. Pre-stage the
+# weights inside me-south-1 and set TORCH_HOME before go-live.
+# =============================================================================
