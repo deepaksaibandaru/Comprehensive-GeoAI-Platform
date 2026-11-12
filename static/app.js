@@ -800,13 +800,27 @@ function createNewLabel(name) {
     .then(r => r.json()).then(d => {
         if (!d.success) { addLog('error', 'Failed: ' + (d.error || 'unknown')); return; }
         if (!allLabels.includes(safe)) allLabels.push(safe); if (selectedProjectData) { if (!selectedProjectData.labels) selectedProjectData.labels = ['background']; if (!selectedProjectData.labels.includes(safe)) selectedProjectData.labels.push(safe); } if (!classNames.includes(safe)) classNames.push(safe);
-        refreshLabelDropdown(); addLog('success', 'Created label: ' + safe); loadLabels();
+        currentLabel = safe;
+        refreshLabelDropdown();
+        selectLabel(safe);
+        if (drawnItems && drawnItems.getLayers().length > 0) {
+            drawnItems.getLayers().forEach(layer => {
+                if (layer.feature && layer.feature.properties) {
+                    layer.feature.properties.label = safe;
+                    layer.feature.properties.class_name = safe;
+                }
+            });
+        }
+        addLog('success', 'Created and selected label: ' + safe); loadLabels();
     }).catch(e => addLog('error', 'Create label error: ' + e.message));
 }
 
 function selectLabel(name) {
     if (!name || name === '__new__') return;
-    currentLabel = name; document.getElementById('activeLabelDisplay').textContent = name; document.getElementById('objectLabel').value = name;
+    currentLabel = name;
+    const disp = document.getElementById('activeLabelDisplay'); if (disp) disp.textContent = name;
+    const objInp = document.getElementById('objectLabel'); if (objInp) objInp.value = name;
+    const sel = document.getElementById('labelDropdown'); if (sel && sel.value !== name) sel.value = name;
     fetch('/api/labels/select', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({label_name: name}) }).catch(function(){});
 }
 
@@ -1335,7 +1349,21 @@ function displayAndZoomAnnotations(features, ann) {
     if (bounds && bounds.isValid() && map) map.fitBounds(bounds, {padding:[50,50], maxZoom:18});
     const st = document.getElementById('annotationStatus'); if (st) { st.textContent = '✅ Loaded ' + count + ' ' + (isBoxAnnotationModel(annotationModelType) ? 'boxes' : 'polygons') + ' (' + fileLabel + ')'; st.style.color = '#34d399'; }
     if (count > 0 && typeof previewLabelClusterAOIs === 'function') setTimeout(() => previewLabelClusterAOIs(), 600);
-    closeAnnotationModal(); currentLabel = fileLabel; document.getElementById('activeLabelDisplay').textContent = fileLabel; document.getElementById('objectLabel').value = fileLabel;
+    closeAnnotationModal();
+    if (fileLabel && fileLabel !== 'unlabeled') {
+        currentLabel = fileLabel;
+        if (!allLabels.includes(fileLabel)) allLabels.push(fileLabel);
+        if (selectedProjectData) {
+            if (!selectedProjectData.labels) selectedProjectData.labels = ['background'];
+            if (!selectedProjectData.labels.includes(fileLabel)) selectedProjectData.labels.push(fileLabel);
+        }
+        refreshLabelDropdown();
+        selectLabel(fileLabel);
+    } else {
+        currentLabel = fileLabel;
+        document.getElementById('activeLabelDisplay').textContent = fileLabel;
+        document.getElementById('objectLabel').value = fileLabel;
+    }
 }
 
 async function mergeAllLabels() {
@@ -1372,6 +1400,27 @@ async function buildDataset() {
         const feature = layerToAnnotationFeature(layer, Object.assign({}, existingProps, { project_id: currentProjectId, label: activeLabelName, class_name: activeLabelName }), getSelectedProjectAnnotationModelType());
         if (feature) features.push(feature);
     });
+    // Auto-adopt fallback: if annotations exist on map but none matched activeLabelName, adopt all under activeLabelName
+    if (!features.length && layers.length > 0) {
+        addLog('info', `Adopting ${layers.length} annotations under active label "${activeLabelName}"...`);
+        layers.forEach(layer => {
+            const existingProps = (layer.feature && layer.feature.properties) || {};
+            existingProps.label = activeLabelName;
+            existingProps.class_name = activeLabelName;
+            if (layer.feature) {
+                layer.feature.properties = Object.assign({}, layer.feature.properties || {}, {
+                    label: activeLabelName,
+                    class_name: activeLabelName
+                });
+            }
+            const feature = layerToAnnotationFeature(layer, Object.assign({}, existingProps, {
+                project_id: currentProjectId,
+                label: activeLabelName,
+                class_name: activeLabelName
+            }), getSelectedProjectAnnotationModelType());
+            if (feature) features.push(feature);
+        });
+    }
     if (!features.length) {
         addLog('error', 'No valid annotation geometries available.');
         if (status) status.textContent = '❌ No valid annotations';

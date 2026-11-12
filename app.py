@@ -1309,6 +1309,16 @@ async def plan_label_cluster_aois(data: Dict):
                 if not geom.is_valid: geom = geom.buffer(0)
                 if not geom.is_empty: valid.append((geom, feature))
             except Exception: continue
+        if not valid and features:
+            for feature in features:
+                geom_json = feature.get("geometry")
+                if not geom_json: continue
+                try:
+                    geom = shape(geom_json)
+                    if geom.is_empty: continue
+                    if not geom.is_valid: geom = geom.buffer(0)
+                    if not geom.is_empty: valid.append((geom, feature))
+                except Exception: continue
         if not valid: return JSONResponse({"success": False, "error": f"No valid annotations found for active label '{active_label}'. Available: {', '.join(sorted(available_labels)) or 'none'}"}, status_code=400)
 
         # Optional bounds clipping (e.g. current map extent or user selected boundary)
@@ -1445,7 +1455,17 @@ async def build_dataset_api(data: Dict):
             all_stats = {}
             last_metadata = {}
             aoi_success_count = 0
+            active_name = str(label).strip().casefold()
             
+            # Adopt features if none match active_name
+            matching_features = [f for f in features if str((f.get("properties") or {}).get("class_name") or (f.get("properties") or {}).get("label") or (f.get("properties") or {}).get("class") or "").strip().casefold() == active_name]
+            if not matching_features and features:
+                print(f"ℹ️ Auto-adopting {len(features)} features to active label '{label}'")
+                for f in features:
+                    props = f.setdefault("properties", {})
+                    props["class_name"] = str(label).strip()
+                    props["label"] = str(label).strip()
+
             for idx, aoi in enumerate(aois):
                 aoi_bounds = aoi.get("bounds")
                 if not aoi_bounds: continue
@@ -1536,9 +1556,18 @@ async def build_dataset_api(data: Dict):
         # --- SINGLE AOI / EXISTING WORKFLOW ---
         bounds, image_path = data.get("bounds") or training_state.image_bounds_latlon, data.get("image_path") or training_state.image_path
         aoi_geometry = data.get("aoi_geometry")
+        active_name = str(label).strip().casefold()
+        matching_features = [f for f in features if str((f.get("properties") or {}).get("class_name") or (f.get("properties") or {}).get("label") or (f.get("properties") or {}).get("class") or "").strip().casefold() == active_name]
+        if not matching_features and features:
+            print(f"ℹ️ Auto-adopting {len(features)} features to active label '{label}'")
+            for f in features:
+                props = f.setdefault("properties", {})
+                props["class_name"] = str(label).strip()
+                props["label"] = str(label).strip()
+
         if data.get("is_aoi") and aoi_geometry:
             try:
-                aoi_shape, filtered_features, active_name = shape(aoi_geometry), [], str(label).strip().casefold()
+                aoi_shape, filtered_features = shape(aoi_geometry), []
                 for feature in features:
                     props = feature.get("properties") or {}
                     if str(props.get("class_name") or props.get("label") or props.get("class") or active_name).strip().casefold() != active_name: continue
