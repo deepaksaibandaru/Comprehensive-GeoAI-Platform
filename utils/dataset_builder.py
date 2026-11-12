@@ -57,8 +57,9 @@ def _key(v): return str(v or "").strip().lower().replace(" ", "_").replace("-", 
 class DatasetBuilder:
     def __init__(self, source_image_path=None, annotation_path=None, geojson_path=None, features=None,
                  class_names=None, tile_size=512, overlap=.2, bounds=None, label="object",
-                 shape_type="rectangle", model_type="unet", task_type=None):
+                 shape_type="rectangle", model_type="unet", task_type=None, chip_prefix="chip_"):
         self.source_image_path = source_image_path
+        self.chip_prefix = str(chip_prefix or "chip_")
         self.tile_size = int(tile_size)
         self.overlap = min(max(float(overlap), 0.0), .9)
         self.label, self.shape_type, self.task_type = label, shape_type, task_type or ""
@@ -249,7 +250,7 @@ class DatasetBuilder:
                 for inst in instances: m=np.where(inst["mask"]>0,inst["mask"],m).astype(np.uint8)
                 has=bool(np.any(m>0))
                 if not has and random.random()>.45: continue
-                chips.append({"name":f"chip_{len(chips):06d}.png","image":crop,"mask":m,"x":x,"y":y,"has_foreground":has,"instances":instances,"geo_bounds":self._get_chip_geo_bounds(x,y,tile,tile)})
+                chips.append({"name":f"{self.chip_prefix}{len(chips):06d}.png","image":crop,"mask":m,"x":x,"y":y,"has_foreground":has,"instances":instances,"geo_bounds":self._get_chip_geo_bounds(x,y,tile,tile)})
         # Ensure final edge coverage if step doesn't land on the last valid window.
         if image.shape[1]>=tile and image.shape[0]>=tile:
             xs=max(0,image.shape[1]-tile); ys=max(0,image.shape[0]-tile)
@@ -258,7 +259,7 @@ class DatasetBuilder:
                 crop=image[y:y+tile,x:x+tile]; instances=self._create_chip_instances(x,y,tile); m=np.zeros((tile,tile),dtype=np.uint8)
                 for inst in instances: m=np.where(inst["mask"]>0,inst["mask"],m).astype(np.uint8)
                 has=bool(np.any(m>0))
-                if has or random.random()<=.45: chips.append({"name":f"chip_{len(chips):06d}.png","image":crop,"mask":m,"x":x,"y":y,"has_foreground":has,"instances":instances,"geo_bounds":self._get_chip_geo_bounds(x,y,tile,tile)})
+                if has or random.random()<=.45: chips.append({"name":f"{self.chip_prefix}{len(chips):06d}.png","image":crop,"mask":m,"x":x,"y":y,"has_foreground":has,"instances":instances,"geo_bounds":self._get_chip_geo_bounds(x,y,tile,tile)})
         self.chip_images=[]
         previews=[c for c in chips if c["has_foreground"]][:6]+[c for c in chips if not c["has_foreground"]][:2]
         for c in previews:
@@ -266,7 +267,7 @@ class DatasetBuilder:
         print(f"📊 Generated {len(chips)} chips ({sum(c['has_foreground'] for c in chips)} positive)")
         return chips
 
-    def build_dataset(self, output_dir=None, split_ratios=None):
+    def build_dataset(self, output_dir=None, split_ratios=None, append=False):
         split_ratios=split_ratios or {"train":.70,"val":.15,"test":.15}
         output_dir=output_dir or os.path.dirname(self.source_image_path) or "."
         dataset_dir=os.path.join(output_dir,"dataset"); chips_dir=os.path.join(output_dir,"chips")
@@ -281,7 +282,16 @@ class DatasetBuilder:
         val_n=max(1,int(n*split_ratios.get("val",.15))) if n>3 else 0
         if train_n+val_n>n: val_n=max(0,n-train_n)
         split_chips={"train":chips[:train_n],"val":chips[train_n:train_n+val_n],"test":chips[train_n+val_n:]}
-        bounds_map={}; stats={}
+        
+        # If appending to existing dataset, load existing bounds_map and stats
+        bounds_map = {}
+        if append and os.path.exists(os.path.join(dataset_dir, "chip_bounds.json")):
+            try:
+                with open(os.path.join(dataset_dir, "chip_bounds.json"), "r", encoding="utf-8") as f:
+                    bounds_map = json.load(f)
+            except Exception: bounds_map = {}
+            
+        stats={}
         for split, data in split_chips.items():
             stats[split]={"total":len(data),"positive":sum(c["has_foreground"] for c in data),"negative":sum(not c["has_foreground"] for c in data),"instances":sum(len(c["instances"]) for c in data)}
             for chip in data:
@@ -311,14 +321,54 @@ class DatasetBuilder:
         json.dump(bounds_map,open(os.path.join(dataset_dir,"chip_bounds.json"),"w",encoding="utf-8"),indent=2)
         class_id_map={str(i):str(v) for i,v in enumerate(self.class_names)}
         contract=self.model_target_contract
-        metadata={"source_image":str(self.source_image_path),"annotation_file":self.annotation_path,"class_names":self.class_names,"num_classes":self.num_classes,"class_id_map":class_id_map,"resolved_class_distribution":self._resolved_class_distribution,"tile_size":self.tile_size,"overlap":self.overlap,"image_size":[self.img_width,self.img_height],"bounds":self.bounds,"is_geo":self.is_geo,"created":datetime.now().isoformat(),"total_chips":n,"num_features":len(self.features),"split_stats":stats,"selected_model_type":self.model_type,"model_family":contract["model_family"],"primary_target":contract["primary_target"],"model_target_contract":contract,"supported_model_types":sorted(ALL_MODEL_TYPES),"target_assets":{"semantic":"<split>/masks/<chip>.png","detection":"<split>/detection_targets/<chip>.json","instance":"<split>/instance_targets/<chip>.json","instance_masks":"<split>/instance_masks/<chip_stem>/instance_XXXX.png"},"chip_bounds_file":"chip_bounds.json","instance_target_format":"torchvision_mask_rcnn","instance_target_version":2,"instance_masks_shape":[self.tile_size,self.tile_size],"semantic_mask_format":"binary_0_255","pixel_mapping":"img_width/img_height; native pixels; no resize during chip creation","no_synthetic_fallback":True,"target_manifest_file":"target_manifest.json"}
+
+        # Load and accumulate previous metadata if appending
+        prev_metadata = {}
+        if append and os.path.exists(os.path.join(dataset_dir, "metadata.json")):
+            try:
+                with open(os.path.join(dataset_dir, "metadata.json"), "r", encoding="utf-8") as f:
+                    prev_metadata = json.load(f)
+            except Exception: prev_metadata = {}
+            
+        combined_stats = dict(stats)
+        if prev_metadata.get("split_stats"):
+            prev_s = prev_metadata["split_stats"]
+            for s in ("train", "val", "test"):
+                if s in prev_s and s in combined_stats:
+                    for k in ("total", "positive", "negative", "instances"):
+                        combined_stats[s][k] = combined_stats[s].get(k, 0) + prev_s[s].get(k, 0)
+
+        total_chips_count = n + prev_metadata.get("total_chips", 0) if append else n
+        all_previews = (prev_metadata.get("chip_previews", []) + self.chip_images)[:10] if append else self.chip_images
+
+        metadata={"source_image":str(self.source_image_path),"annotation_file":self.annotation_path,"class_names":self.class_names,"num_classes":self.num_classes,"class_id_map":class_id_map,"resolved_class_distribution":self._resolved_class_distribution,"tile_size":self.tile_size,"overlap":self.overlap,"image_size":[self.img_width,self.img_height],"bounds":self.bounds,"is_geo":self.is_geo,"created":datetime.now().isoformat(),"total_chips":total_chips_count,"num_features":len(self.features),"split_stats":combined_stats,"selected_model_type":self.model_type,"model_family":contract["model_family"],"primary_target":contract["primary_target"],"model_target_contract":contract,"supported_model_types":sorted(ALL_MODEL_TYPES),"target_assets":{"semantic":"<split>/masks/<chip>.png","detection":"<split>/detection_targets/<chip>.json","instance":"<split>/instance_targets/<chip>.json","instance_masks":"<split>/instance_masks/<chip_stem>/instance_XXXX.png"},"chip_bounds_file":"chip_bounds.json","instance_target_format":"torchvision_mask_rcnn","instance_target_version":2,"instance_masks_shape":[self.tile_size,self.tile_size],"semantic_mask_format":"binary_0_255","pixel_mapping":"img_width/img_height; native pixels; no resize during chip creation","no_synthetic_fallback":True,"target_manifest_file":"target_manifest.json","chip_previews":all_previews}
         manifest={"dataset_version":4,"selected_model_type":self.model_type,"model_family":contract["model_family"],"primary_target":contract["primary_target"],"contract":contract,"num_classes":self.num_classes,"class_names":self.class_names,"class_id_map":class_id_map,"splits":{}}
+        
+        # Load previous manifest if appending
+        prev_manifest = {}
+        if append and os.path.exists(os.path.join(dataset_dir, "target_manifest.json")):
+            try:
+                with open(os.path.join(dataset_dir, "target_manifest.json"), "r", encoding="utf-8") as f:
+                    prev_manifest = json.load(f)
+            except Exception: prev_manifest = {}
+
         for split,data in split_chips.items():
-            manifest["splits"][split]={"image_count":len(data),"positive_count":sum(c["has_foreground"] for c in data),"instance_count":sum(len(c["instances"]) for c in data),"class_id_counts":{str(cid):sum(1 for c in data for i in c["instances"] if i["class_id"]==cid) for cid in range(self.num_classes)},"image_dir":f"{split}/images","semantic_dir":f"{split}/masks","detection_dir":f"{split}/detection_targets","instance_target_dir":f"{split}/instance_targets","instance_mask_dir":f"{split}/instance_masks"}
+            prev_sp = prev_manifest.get("splits", {}).get(split, {}) if append else {}
+            manifest["splits"][split]={
+                "image_count": len(data) + prev_sp.get("image_count", 0),
+                "positive_count": sum(c["has_foreground"] for c in data) + prev_sp.get("positive_count", 0),
+                "instance_count": sum(len(c["instances"]) for c in data) + prev_sp.get("instance_count", 0),
+                "class_id_counts": {str(cid): sum(1 for c in data for i in c["instances"] if i["class_id"]==cid) + prev_sp.get("class_id_counts", {}).get(str(cid), 0) for cid in range(self.num_classes)},
+                "image_dir": f"{split}/images",
+                "semantic_dir": f"{split}/masks",
+                "detection_dir": f"{split}/detection_targets",
+                "instance_target_dir": f"{split}/instance_targets",
+                "instance_mask_dir": f"{split}/instance_masks"
+            }
         json.dump(convert_to_serializable(manifest),open(os.path.join(dataset_dir,"target_manifest.json"),"w",encoding="utf-8"),indent=2)
         json.dump(convert_to_serializable(metadata),open(os.path.join(dataset_dir,"metadata.json"),"w",encoding="utf-8"),indent=2)
         json.dump(convert_to_serializable(metadata),open(os.path.join(chips_dir,"metadata.json"),"w",encoding="utf-8"),indent=2)
-        print(f"✅ Dataset built: {n} chips; split stats={stats}; targets={contract['primary_target']}")
-        return dataset_dir, metadata, stats
+        print(f"✅ Dataset built: {total_chips_count} chips ({n} in current batch); split stats={combined_stats}; targets={contract['primary_target']}")
+        return dataset_dir, metadata, combined_stats
 
     def get_chip_previews(self): return self.chip_images

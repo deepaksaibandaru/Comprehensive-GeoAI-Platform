@@ -111,6 +111,10 @@ const mapServicesReady = loadMapServices();
 let map, mapPredict, evalMap;
 let labelClusterAOILayer = null;
 let drawnItems, drawControl;
+let userAois = [];
+let userAoisLayer = null;
+let isDrawingAoiMode = false;
+let currentAoiDrawer = null;
 let selectedAnnotationLayer = null;
 let projectCreateInFlight = false;
 let predictDrawControl, predictDrawnItems;
@@ -331,10 +335,15 @@ function initMapDirect() {
         map = L.map('map', {center: [25.0, 55.06], zoom: 12, preferCanvas: true});
         currentTileLayer = basemapLayer(); if (currentTileLayer) currentTileLayer.addTo(map); else showBasemapBlocked(c);
         drawnItems = L.featureGroup().addTo(map);
+        userAoisLayer = L.featureGroup().addTo(map);
         drawControl = new L.Control.Draw({ position: 'topright', draw: { polygon: { allowIntersection: false, showArea: true, shapeOptions: { color: '#4ecdc4', weight: 3, fillColor: '#4ecdc4', fillOpacity: 0.4 } }, rectangle: { shapeOptions: { color: '#a78bfa', weight: 3, fillColor: '#a78bfa', fillOpacity: 0.4 } }, circle: { shapeOptions: { color: '#f87171', weight: 3, fillColor: '#f87171', fillOpacity: 0.4 } }, polyline: { shapeOptions: { color: '#38bdf8', weight: 4, opacity: 0.95 } }, marker: {draggable: true}, circlemarker: {radius: 6, shapeOptions: {color:'#fbbf24', weight:2, fillColor:'#fbbf24', fillOpacity:0.6}} }, edit: {featureGroup: drawnItems, remove: true} });
         map.addControl(drawControl);
         installAnnotationSelectionToolbar();
         map.on(L.Draw.Event.CREATED, function(ev) {
+            if (isDrawingAoiMode) {
+                handleAoiCreated(ev.layer);
+                return;
+            }
             const layer = ev.layer, t = ev.layerType; const annotationModelType = getSelectedProjectAnnotationModelType();
             const feat = layerToAnnotationFeature(layer, { original_draw_type: t, project_model_type: annotationModelType }, annotationModelType);
             if (!feat) { return; }
@@ -848,6 +857,352 @@ async function previewLabelClusterAOIs() {
 
 function clearLabelClusterAOIs() { if (labelClusterAOILayer && map) { try { map.removeLayer(labelClusterAOILayer); } catch (_) {} } labelClusterAOILayer = null; window.activeLabelAOI = null; }
 
+function countAnnotationsInBounds(bounds, labelName) {
+    if (!drawnItems) return 0;
+    const normalize = v => String(v || '').trim().toLowerCase();
+    const targetLabel = normalize(labelName);
+    let count = 0;
+    drawnItems.getLayers().forEach(l => {
+        const props = (l.feature && l.feature.properties) || {};
+        const lLabel = normalize(props.class_name || props.label || props.class || props.label_name || targetLabel);
+        if (targetLabel && lLabel !== targetLabel) return;
+        const b = l.getBounds ? l.getBounds() : (l.getLatLng ? L.latLngBounds(l.getLatLng(), l.getLatLng()) : null);
+        if (!b) return;
+        const c = b.getCenter();
+        if (c.lat >= bounds.south && c.lat <= bounds.north && c.lng >= bounds.west && c.lng <= bounds.east) {
+            count++;
+        }
+    });
+    return count;
+}
+
+function toggleDrawAoiMode() {
+    if (!map) return;
+    isDrawingAoiMode = !isDrawingAoiMode;
+    const btn = document.getElementById('btnDrawAoi');
+    if (isDrawingAoiMode) {
+        if (btn) btn.classList.add('btn-aoi-active');
+        if (btn) btn.innerHTML = '<i class="fas fa-crosshairs"></i> Drag on Map...';
+        addLog('info', 'AOI Drawing Mode: Click and drag on the map to define an Area of Interest');
+        if (currentAoiDrawer) { currentAoiDrawer.disable(); }
+        currentAoiDrawer = new L.Draw.Rectangle(map, {
+            shapeOptions: {
+                color: '#f59e0b',
+                weight: 3,
+                dashArray: '6 4',
+                fillColor: '#f59e0b',
+                fillOpacity: 0.12
+            }
+        });
+        currentAoiDrawer.enable();
+    } else {
+        if (btn) btn.classList.remove('btn-aoi-active');
+        if (btn) btn.innerHTML = '<i class="fas fa-vector-square"></i> + Draw AOI';
+        if (currentAoiDrawer) {
+            currentAoiDrawer.disable();
+            currentAoiDrawer = null;
+        }
+    }
+}
+
+function handleAoiCreated(layer) {
+    if (!userAoisLayer) {
+        userAoisLayer = L.featureGroup().addTo(map);
+    }
+    const b = layer.getBounds();
+    if (!b || !b.isValid()) return;
+    const aoiId = 'aoi_' + Date.now();
+    const aoiName = 'AOI #' + (userAois.length + 1);
+    const bounds = { west: b.getWest(), south: b.getSouth(), east: b.getEast(), north: b.getNorth() };
+    const activeLabelName = getActiveAnnotationLabel();
+    const count = countAnnotationsInBounds(bounds, activeLabelName);
+    
+    layer.setStyle({
+        color: '#f59e0b',
+        weight: 3,
+        dashArray: '6 4',
+        fillColor: '#f59e0b',
+        fillOpacity: 0.12
+    });
+
+    const aoiObj = {
+        id: aoiId,
+        name: aoiName,
+        bounds: bounds,
+        geometry: layerToGeoJSONGeometry(layer),
+        layer: layer,
+        annotation_count: count,
+        active_label: activeLabelName
+    };
+
+    bindAoiEvents(aoiObj);
+    userAoisLayer.addLayer(layer);
+    userAois.push(aoiObj);
+
+    toggleDrawAoiMode();
+    renderAoiList();
+    addLog('success', `Created ${aoiName} with ${count} annotations. You can draw more AOIs in other regions.`);
+}
+
+function layerToGeoJSONGeometry(layer) {
+    if (typeof layer.toGeoJSON === 'function') {
+        const gj = layer.toGeoJSON();
+        return gj.geometry || null;
+    }
+    const b = layer.getBounds();
+    return {
+        type: 'Polygon',
+        coordinates: [[
+            [b.getWest(), b.getSouth()],
+            [b.getEast(), b.getSouth()],
+            [b.getEast(), b.getNorth()],
+            [b.getWest(), b.getNorth()],
+            [b.getWest(), b.getSouth()]
+        ]]
+    };
+}
+
+function bindAoiEvents(aoi) {
+    const layer = aoi.layer;
+    if (!layer) return;
+    
+    layer.bindTooltip(`${aoi.name} (${aoi.annotation_count} ${aoi.active_label})`, {
+        permanent: true,
+        direction: 'top',
+        className: 'aoi-map-label'
+    });
+
+    const popupContent = document.createElement('div');
+    popupContent.style.cssText = 'font-size:11px;min-width:140px;';
+    popupContent.innerHTML = `
+        <div style="font-weight:700;color:#f59e0b;margin-bottom:4px;">${aoi.name}</div>
+        <div style="color:#94a3b8;margin-bottom:6px;">${aoi.annotation_count} ${aoi.active_label} annotations</div>
+        <div style="display:flex;gap:4px;">
+            <button class="btn btn-secondary btn-xs" onclick="zoomToAoi('${aoi.id}')" title="Zoom to this AOI"><i class="fas fa-search-plus"></i> Zoom</button>
+            <button class="btn btn-info btn-xs" onclick="toggleEditAoi('${aoi.id}')" title="Edit boundary"><i class="fas fa-pen"></i> Edit</button>
+            <button class="btn btn-danger btn-xs" onclick="deleteUserAoi('${aoi.id}')" title="Delete AOI"><i class="fas fa-trash"></i></button>
+        </div>
+    `;
+    layer.bindPopup(popupContent);
+}
+
+function renderAoiList() {
+    const container = document.getElementById('aoiListContainer');
+    const list = document.getElementById('aoiList');
+    const badge = document.getElementById('aoiCountBadge');
+    const header = document.getElementById('aoiListHeader');
+    if (!container || !list) return;
+
+    if (userAois.length === 0) {
+        container.style.display = 'none';
+        if (badge) badge.style.display = 'none';
+        return;
+    }
+
+    container.style.display = 'block';
+    if (badge) {
+        badge.style.display = 'inline-block';
+        badge.textContent = `${userAois.length} AOI${userAois.length > 1 ? 's' : ''}`;
+    }
+    if (header) {
+        header.textContent = `Active AOIs (${userAois.length}):`;
+    }
+
+    list.innerHTML = '';
+    userAois.forEach((aoi) => {
+        const isEditing = aoi.layer && aoi.layer.editing && aoi.layer.editing.enabled && aoi.layer.editing.enabled();
+        const item = document.createElement('div');
+        item.className = 'aoi-item' + (isEditing ? ' active-editing' : '');
+        item.innerHTML = `
+            <div class="aoi-info" title="${aoi.name}: ${aoi.annotation_count} annotations">
+                <i class="fas fa-vector-square" style="color:#f59e0b;font-size:10px;"></i>
+                <span style="font-weight:600;color:#f1f5f9;">${aoi.name}</span>
+                <span style="color:#38bdf8;font-size:9px;">(${aoi.annotation_count} ${aoi.active_label})</span>
+            </div>
+            <div class="aoi-actions">
+                <button type="button" class="btn btn-secondary btn-xs" style="padding:1px 5px;height:20px;font-size:9px;" onclick="zoomToAoi('${aoi.id}')" title="Zoom to AOI">
+                    <i class="fas fa-search-plus"></i>
+                </button>
+                <button type="button" class="btn ${isEditing ? 'btn-success' : 'btn-info'} btn-xs" style="padding:1px 5px;height:20px;font-size:9px;" onclick="toggleEditAoi('${aoi.id}')" title="${isEditing ? 'Done Editing' : 'Edit Boundary'}">
+                    <i class="fas ${isEditing ? 'fa-check' : 'fa-pen'}"></i>
+                </button>
+                <button type="button" class="btn btn-danger btn-xs" style="padding:1px 5px;height:20px;font-size:9px;" onclick="deleteUserAoi('${aoi.id}')" title="Delete AOI">
+                    <i class="fas fa-trash"></i>
+                </button>
+            </div>
+        `;
+        list.appendChild(item);
+    });
+}
+
+function zoomToAoi(aoiId) {
+    const aoi = userAois.find(a => a.id === aoiId);
+    if (!aoi || !aoi.bounds || !map) return;
+    map.fitBounds([[aoi.bounds.south, aoi.bounds.west], [aoi.bounds.north, aoi.bounds.east]], { padding: [40, 40], maxZoom: 18 });
+}
+
+function toggleEditAoi(aoiId) {
+    const aoi = userAois.find(a => a.id === aoiId);
+    if (!aoi || !aoi.layer) return;
+    
+    if (aoi.layer.editing) {
+        if (aoi.layer.editing.enabled && aoi.layer.editing.enabled()) {
+            aoi.layer.editing.disable();
+            const b = aoi.layer.getBounds();
+            aoi.bounds = { west: b.getWest(), south: b.getSouth(), east: b.getEast(), north: b.getNorth() };
+            aoi.geometry = layerToGeoJSONGeometry(aoi.layer);
+            aoi.annotation_count = countAnnotationsInBounds(aoi.bounds, aoi.active_label);
+            if (aoi.layer.setTooltipContent) {
+                aoi.layer.setTooltipContent(`${aoi.name} (${aoi.annotation_count} ${aoi.active_label})`);
+            }
+            renderAoiList();
+            addLog('success', `Updated ${aoi.name}: ${aoi.annotation_count} annotations.`);
+        } else {
+            userAois.forEach(a => { if (a.id !== aoiId && a.layer && a.layer.editing && a.layer.editing.enabled && a.layer.editing.enabled()) a.layer.editing.disable(); });
+            aoi.layer.editing.enable();
+            renderAoiList();
+            addLog('info', `Editing ${aoi.name}: drag corners to resize, then click Done checkmark.`);
+        }
+    }
+}
+
+function deleteUserAoi(aoiId) {
+    const aoi = userAois.find(a => a.id === aoiId);
+    if (!aoi) return;
+    if (aoi.layer && userAoisLayer) {
+        userAoisLayer.removeLayer(aoi.layer);
+    }
+    userAois = userAois.filter(a => a.id !== aoiId);
+    userAois.forEach((a, idx) => {
+        a.name = 'AOI #' + (idx + 1);
+        if (a.layer && a.layer.setTooltipContent) {
+            a.layer.setTooltipContent(`${a.name} (${a.annotation_count} ${a.active_label})`);
+        }
+    });
+    renderAoiList();
+    addLog('info', 'Deleted AOI.');
+}
+
+function clearAllUserAois() {
+    if (userAois.length === 0) {
+        addLog('info', 'No AOIs to clear.');
+        return;
+    }
+    if (!confirm(`Clear all ${userAois.length} AOIs?`)) return;
+    if (userAoisLayer) {
+        userAoisLayer.clearLayers();
+    }
+    userAois = [];
+    renderAoiList();
+    addLog('info', 'Cleared all AOIs.');
+}
+
+function toggleClusterOptions(forceState) {
+    const panel = document.getElementById('clusterAoiOptions');
+    if (!panel) return;
+    if (forceState !== undefined) {
+        panel.style.display = forceState ? 'block' : 'none';
+    } else {
+        panel.style.display = (panel.style.display === 'none' || !panel.style.display) ? 'block' : 'none';
+    }
+}
+
+async function executeClusterAOIs() {
+    if (!map) return;
+    if (!drawnItems || drawnItems.getLayers().length === 0) {
+        addLog('warning', 'Load or draw annotations before clustering AOIs.');
+        return;
+    }
+    const dist = Number(document.getElementById('clusterDistMeters')?.value || 150);
+    const buf = Number(document.getElementById('clusterBufferMeters')?.value || 25);
+    const minAnn = Number(document.getElementById('clusterMinLabels')?.value || 5);
+    const inViewOnly = document.getElementById('clusterInCurrentViewOnly')?.checked ?? true;
+    const activeLabelName = getActiveAnnotationLabel();
+
+    addLog('info', `Clustering ${activeLabelName} annotations (dist=${dist}m, buffer=${buf}m)...`);
+
+    const features = [];
+    const normalizeLabel = value => String(value || '').trim().toLowerCase();
+    drawnItems.getLayers().forEach(layer => {
+        const existingProps = (layer.feature && layer.feature.properties) || {};
+        const layerLabel = String(existingProps.class_name || existingProps.label || existingProps.class || existingProps.label_name || activeLabelName).trim();
+        if (normalizeLabel(layerLabel) !== normalizeLabel(activeLabelName)) return;
+        const feature = layerToAnnotationFeature(layer, Object.assign({}, existingProps, {label: layerLabel, class_name: layerLabel}), getSelectedProjectAnnotationModelType());
+        if (feature && feature.geometry) features.push(feature);
+    });
+
+    if (!features.length) {
+        addLog('error', `No annotations found matching "${activeLabelName}".`);
+        return;
+    }
+
+    let boundsClip = null;
+    if (inViewOnly && map) {
+        const mb = map.getBounds();
+        boundsClip = { north: mb.getNorth(), south: mb.getSouth(), east: mb.getEast(), west: mb.getWest() };
+    }
+
+    try {
+        const res = await fetch('/api/dataset/plan-aoi', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                features,
+                cluster: true,
+                cluster_distance_m: dist,
+                aoi_buffer_m: buf,
+                min_cluster_annotations: minAnn,
+                active_label: activeLabelName,
+                bounds: boundsClip
+            })
+        });
+        const result = await res.json();
+        if (!res.ok || !result.success) throw new Error(result.error || 'Clustering failed.');
+        
+        const aois = Array.isArray(result.aois) ? result.aois : [];
+        if (!aois.length) {
+            addLog('warning', 'No dense clusters found with current settings. Try decreasing cluster distance or min labels.');
+            return;
+        }
+
+        if (!userAoisLayer) userAoisLayer = L.featureGroup().addTo(map);
+
+        aois.forEach(c => {
+            const aoiId = 'aoi_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6);
+            const aoiName = 'AOI #' + (userAois.length + 1);
+            const bounds = c.bounds;
+            const style = { color: '#f59e0b', weight: 3, opacity: 1, fillColor: '#f59e0b', fillOpacity: 0.1, dashArray: '6 4' };
+            const layer = c.geometry ? L.geoJSON(c.geometry, { style: () => style }) : L.rectangle([[bounds.south, bounds.west], [bounds.north, bounds.east]], style);
+            
+            const targetLayer = layer.getLayers ? (layer.getLayers()[0] || layer) : layer;
+            
+            const aoiObj = {
+                id: aoiId,
+                name: aoiName,
+                bounds: bounds,
+                geometry: c.geometry || null,
+                layer: targetLayer,
+                annotation_count: c.annotation_count || 0,
+                active_label: activeLabelName
+            };
+
+            bindAoiEvents(aoiObj);
+            userAoisLayer.addLayer(targetLayer);
+            userAois.push(aoiObj);
+        });
+
+        toggleClusterOptions(false);
+        renderAoiList();
+        
+        if (userAoisLayer.getBounds().isValid()) {
+            map.fitBounds(userAoisLayer.getBounds(), { padding: [30, 30] });
+        }
+        addLog('success', `⚡ Generated ${aois.length} cluster AOIs (${result.total_annotations_clustered || 0} annotations total).`);
+    } catch (e) {
+        addLog('error', 'Cluster AOI failed: ' + e.message);
+    }
+}
+
 function saveAnnotations() {
     if (!currentProjectId) { addLog('warning','Select a project'); return; }
     if (!drawnItems || drawnItems.getLayers().length === 0) { addLog('warning','No shapes drawn'); return; }
@@ -1001,15 +1356,65 @@ function downloadFile(url) { if (!url) return; const a = document.createElement(
 async function buildDataset() {
     if (!currentProjectId) { addLog('warning', 'Select a project'); return; }
     if (!drawnItems || drawnItems.getLayers().length === 0) { addLog('warning', 'No shapes drawn.'); return; }
-    const tile = parseInt(document.getElementById('tileSize')?.value || '64', 10), overlap = parseFloat(document.getElementById('tileOverlap')?.value || '0.2'), status = document.getElementById('datasetStatus');
+    const tile = parseInt(document.getElementById('tileSize')?.value || '64', 10), overlap = parseFloat(document.getElementById('tileOverlap')?.value || '0.2'), status = document.getElementById('datasetStatus'), btn = document.getElementById('btnBuildDataset');
     if (status) { status.textContent = '⏳ Preparing...'; status.style.color = '#fbbf24'; }
-    const activeLabelName = getActiveAnnotationLabel(); let activeAOI = window.activeLabelAOI;
-    if (!activeAOI || String(activeAOI.active_label || '').toLowerCase() !== activeLabelName.toLowerCase()) activeAOI = await previewLabelClusterAOIs();
-    if (!activeAOI || !activeAOI.bounds) { addLog('error', 'Cannot build chips: calculate the selected-label red dashed AOI first.'); if (status) status.textContent = '❌ AOI boundary unavailable'; return; }
-    const layers = drawnItems.getLayers().slice(), features = []; let skipped = 0, skippedOtherLabel = 0;
-    layers.forEach(layer => { const existingProps = (layer.feature && layer.feature.properties) || {}, featureLabel = String(existingProps.class_name || existingProps.label || existingProps.class || activeLabelName).trim(); if (featureLabel.toLowerCase() !== activeLabelName.toLowerCase()) { skippedOtherLabel++; return; } const feature = layerToAnnotationFeature(layer, Object.assign({}, existingProps, { project_id: currentProjectId, label: activeLabelName, class_name: activeLabelName }), getSelectedProjectAnnotationModelType()); if (!feature) { skipped++; return; } features.push(feature); });
-    if (!features.length) { addLog('error', 'No valid annotation geometries available.'); if (status) status.textContent = '❌ No valid annotations'; return; }
+    if (btn) btn.disabled = true;
+    const activeLabelName = getActiveAnnotationLabel();
+    const layers = drawnItems.getLayers().slice(), features = [];
+    layers.forEach(layer => {
+        const existingProps = (layer.feature && layer.feature.properties) || {}, featureLabel = String(existingProps.class_name || existingProps.label || existingProps.class || activeLabelName).trim();
+        if (featureLabel.toLowerCase() !== activeLabelName.toLowerCase()) return;
+        const feature = layerToAnnotationFeature(layer, Object.assign({}, existingProps, { project_id: currentProjectId, label: activeLabelName, class_name: activeLabelName }), getSelectedProjectAnnotationModelType());
+        if (feature) features.push(feature);
+    });
+    if (!features.length) {
+        addLog('error', 'No valid annotation geometries available.');
+        if (status) status.textContent = '❌ No valid annotations';
+        if (btn) btn.disabled = false;
+        return;
+    }
     try {
+        // Multi-AOI path
+        if (userAois && userAois.length > 0) {
+            if (status) { status.textContent = `⏳ Building across ${userAois.length} AOIs...`; status.style.color = '#fbbf24'; }
+            addLog('info', `Building dataset across ${userAois.length} independent AOIs (tile=${tile}, overlap=${overlap})...`);
+            const aoisPayload = userAois.map(a => ({
+                id: a.id,
+                name: a.name,
+                bounds: a.bounds,
+                geometry: a.geometry,
+                annotation_count: a.annotation_count
+            }));
+            const buildResponse = await fetch('/api/dataset/build', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    project_id: currentProjectId,
+                    model_type: getCurrentModelType(),
+                    model_type_key: normalizeAnnotationModelType(getCurrentModelType()),
+                    tile_size: tile,
+                    overlap: overlap,
+                    label: activeLabelName,
+                    features: features,
+                    aois: aoisPayload,
+                    service_id: document.getElementById('mapServiceSelect')?.value,
+                    capture_zoom: Math.max(17, Number(trainingZoom) || 0)
+                })
+            });
+            const result = await buildResponse.json();
+            if (!buildResponse.ok || !result.success) throw new Error(result.error || 'Dataset build failed');
+            addLog('success', `🎉 Dataset built: ${result.total_chips} chips from ${result.num_aois || userAois.length} AOIs`);
+            if (status) { status.textContent = `✅ ${result.total_chips} chips (${result.num_aois || userAois.length} AOIs)`; status.style.color = '#34d399'; }
+            const chipCount = document.getElementById('projectChipCount'); if (chipCount) chipCount.textContent = result.total_chips || 0;
+            if (result.chip_previews) displayChipPreviews(result.chip_previews);
+            updateStatus(); loadProjects();
+            return;
+        }
+
+        // Single AOI fallback
+        let activeAOI = window.activeLabelAOI;
+        if (!activeAOI || String(activeAOI.active_label || '').toLowerCase() !== activeLabelName.toLowerCase()) activeAOI = await previewLabelClusterAOIs();
+        if (!activeAOI || !activeAOI.bounds) { addLog('error', 'Cannot build chips: draw an AOI or click Cluster AOI first.'); if (status) status.textContent = '❌ AOI boundary unavailable'; return; }
         const aoiBounds = activeAOI.bounds;
         const captureResponse = await fetch('/api/map/capture', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ bounds: { north: Number(aoiBounds.north), south: Number(aoiBounds.south), east: Number(aoiBounds.east), west: Number(aoiBounds.west) }, zoom: Math.max(17, Number(trainingZoom) || 0), service_id: document.getElementById('mapServiceSelect')?.value, project_id: currentProjectId }) });
         if (!captureResponse.ok) { const err = await captureResponse.json().catch(() => ({})); throw new Error(err.error || 'Image capture failed'); }
@@ -1022,6 +1427,7 @@ async function buildDataset() {
         if (result.chip_previews) displayChipPreviews(result.chip_previews);
         updateStatus(); loadProjects();
     } catch (error) { addLog('error', 'Dataset build error: ' + error.message); if (status) { status.textContent = '❌ ' + error.message; status.style.color = '#f87171'; } }
+    finally { if (btn) btn.disabled = false; }
 }
 
 function displayChipPreviews(chips) {
@@ -1635,4 +2041,5 @@ function useDataset(key) { const m = document.getElementById('mapServiceSelect')
 function loadUploadedDatasets() { fetch('/api/uploaded_datasets').then(r => r.json()).then(d => { const tbody = document.getElementById('uploadedDatasetsBody'); if (!tbody) return; tbody.innerHTML = ''; if (d.success && d.sessions && d.sessions.length) { d.sessions.forEach((s, i) => { tbody.innerHTML += `<tr><td>${i+1}</td><td>${s.session_id}</td><td>${s.upload_date ? new Date(s.upload_date).toLocaleString() : '—'}</td><td>${s.total_size_mb || 0} MB</td><td>${s.file_count || 0}</td><td>—</td><td><button class="btn btn-danger btn-xs" onclick="deleteDataset('${s.session_id}')">Delete</button></td></tr>`; }); } }); }
 function deleteDataset(sid) { if (!confirm('Delete session?')) return; fetch('/api/uploaded_datasets/' + sid, {method:'DELETE'}).then(r => r.json()).then(d => { if (d.success) loadUploadedDatasets(); }); }
 
+window.toggleDrawAoiMode = toggleDrawAoiMode; window.handleAoiCreated = handleAoiCreated; window.zoomToAoi = zoomToAoi; window.toggleEditAoi = toggleEditAoi; window.deleteUserAoi = deleteUserAoi; window.clearAllUserAois = clearAllUserAois; window.toggleClusterOptions = toggleClusterOptions; window.executeClusterAOIs = executeClusterAOIs;
 window.selectProject = selectProject; window.deleteProject = deleteProject; window.showCreateProject = showCreateProject; window.closeCreateProject = closeCreateProject; window.createProjectFromNewModal = createProjectFromNewModal; window.createNewLabel = createNewLabel; window.selectLabel = selectLabel; window.startTraining = startTraining; window.stopTraining = stopTraining; window.runOverfitTest = runOverfitTest; window.loadModel = loadModel; window.deleteModel = deleteModel; window.showLoadModelDialog = showLoadModelDialog; window.evaluateModel = evaluateModel; window.clearEvaluationMetrics = clearEvaluationMetrics; window.drawEvaluationPolygons = drawEvaluationPolygons; window.runPrediction = runPrediction; window.runBatchPredict = runBatchPredict; window.clearPrediction = clearPrediction; window.downloadShapefile = downloadShapefile; window.downloadGeoJSON = downloadGeoJSON; window.exportGeoJSON = exportGeoJSON; window.exportShapefile = exportShapefile; window.mergeAllLabels = mergeAllLabels; window.downloadFile = downloadFile; window.saveAnnotations = saveAnnotations; window.loadAnnotations = loadAnnotations; window.clearAll = clearAll; window.deleteSelectedShape = deleteSelectedShape; window.previewLabelClusterAOIs = previewLabelClusterAOIs; window.clearLabelClusterAOIs = clearLabelClusterAOIs; window.setAOI = setAOI; window.captureMap = captureMap; window.lockTrainingScale = lockTrainingScale; window.buildDataset = buildDataset; window.saveTrainedModel = saveTrainedModel; window.openFolderBrowser = openFolderBrowser; window.showDashboard = showDashboard; window.showProjects = showProjects; window.showModels = showModels; window.showPublicDatasets = showPublicDatasets; window.showUploadedDatasets = showUploadedDatasets; window.showPurchasedDatasets = showPurchasedDatasets; window.showDownload = showDownload; window.switchWorkflow = switchWorkflow; window.searchLocation = searchLocation; window.searchPredictLocation = searchPredictLocation; window.searchEvalLocation = searchEvalLocation; window.refreshPublicDatasets = refreshPublicDatasets; window.refreshAnnotationModalList = refreshAnnotationModalList; window.loadUploadedDatasets = loadUploadedDatasets; window.loadProjects = loadProjects; window.loadModels = loadModels; window.loadLabels = loadLabels; window.renderPredictResults = renderPredictResults; window.zoomToPrediction = zoomToPrediction; window.getCurrentModelType = getCurrentModelType; window.isMaskRCNNModel = isMaskRCNNModel; window.toggleAdvanced = toggleAdvanced; window.getAdvancedTrainingSettings = getAdvancedTrainingSettings; window.loadModelFromModalDropdown = loadModelFromModalDropdown; window.refreshEvaluateModelStatus = refreshEvaluateModelStatus; window.layerToPolygonRing = layerToPolygonRing; window.layerToPolygonFeature = layerToPolygonFeature; window.ringToPolygonGeometry = ringToPolygonGeometry; window.featureToPolygonRing = featureToPolygonRing; window.importDlpk = importDlpk; window.exportDlpk = exportDlpk; window.downloadModel = downloadModel; window.loadFineTuneModelChoices = loadFineTuneModelChoices; window.selectFineTuneExistingModel = selectFineTuneExistingModel; window.importFineTuneModel = importFineTuneModel; window.startTrainingOrFineTune = startTrainingOrFineTune; window.startFineTune = startFineTune; window.exportModelWithFormat = exportModelWithFormat;

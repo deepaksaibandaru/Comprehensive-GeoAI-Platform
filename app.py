@@ -1208,64 +1208,71 @@ async def get_status():
     })
 
 
+def capture_map_image(bounds: Dict, zoom: int, service_id: str = None, project_id: str = None) -> Dict:
+    service = MAP_SERVICES.get(service_id) or MAP_SERVICES.get(training_state.current_map_service) or MAP_SERVICES.get(DEFAULT_MAP_SERVICE)
+    if not service: raise RuntimeError("No basemap service available.")
+    
+    tile_url, north, south, east, west = service["url"], float(bounds["north"]), float(bounds["south"]), float(bounds["east"]), float(bounds["west"])
+    
+    def lon_to_tile_x(lon, z): return (lon + 180.0) / 360.0 * (2 ** z)
+    def lat_to_tile_y(lat, z): return (1.0 - math.log(math.tan(math.radians(lat)) + 1.0 / math.cos(math.radians(lat))) / math.pi) / 2.0 * (2 ** z)
+    def tile_x_to_lon(tx, z): return tx / (2 ** z) * 360.0 - 180.0
+    def tile_y_to_lat(ty, z): return math.degrees(math.atan(math.sinh(math.pi - 2.0 * math.pi * ty / (2 ** z))))
+    
+    use_arcgis = bool(service.get("upstream")) or str(tile_url).startswith("/api/basemap/")
+    if use_arcgis:
+        import arcgis_service
+        if not arcgis_service.is_configured(): raise RuntimeError("IGA imagery proxy not configured.")
+        px_per_deg = 256.0 * (2 ** zoom) / 360.0
+        req_w, req_h = max(16, int(round((east - west) * px_per_deg))), max(16, int(round((north - south) * px_per_deg * math.cos(math.radians((north + south) / 2.0)))))
+        if max(req_w, req_h) > 4096:
+            k = 4096 / float(max(req_w, req_h)); req_w, req_h = max(16, int(req_w * k)), max(16, int(req_h * k))
+        try:
+            raw = arcgis_service.export_image((west, south, east, north), size=(req_w, req_h), bbox_sr=4326, image_sr=4326, image_format="png")
+            stitched = Image.open(BytesIO(raw)).convert("RGB")
+        except Exception as exc:
+            raise RuntimeError(f"ArcGIS exportImage failed: {exc}")
+        w, h, snapped_west, snapped_east, snapped_south, snapped_north = stitched.size[0], stitched.size[1], west, east, south, north
+    else:
+        x_start, x_end, y_start, y_end = int(math.floor(lon_to_tile_x(west, zoom))), int(math.floor(lon_to_tile_x(east, zoom))), int(math.floor(lat_to_tile_y(north, zoom))), int(math.floor(lat_to_tile_y(south, zoom)))
+        tile_count = (x_end - x_start + 1) * (y_end - y_start + 1)
+        if tile_count > 400: raise RuntimeError(f"Capture area too large ({tile_count} tiles). Zoom in or draw a smaller AOI.")
+        snapped_west, snapped_east, snapped_north, snapped_south = tile_x_to_lon(x_start, zoom), tile_x_to_lon(x_end + 1, zoom), tile_y_to_lat(y_start, zoom), tile_y_to_lat(y_end + 1, zoom)
+        tiles = []
+        for x in range(x_start, x_end + 1):
+            for y in range(y_start, y_end + 1):
+                url = tile_url.replace("{s}", "a").replace("{z}", str(zoom)).replace("{x}", str(x)).replace("{y}", str(y))
+                try:
+                    r = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+                    if r.status_code == 200: tiles.append({"image": Image.open(BytesIO(r.content)), "x": x, "y": y})
+                except Exception: pass
+        if not tiles: raise RuntimeError("No tiles downloaded")
+        ts, w, h = 256, (x_end - x_start + 1) * 256, (y_end - y_start + 1) * 256
+        stitched = Image.new("RGB", (w, h))
+        for t in tiles: stitched.paste(t["image"], ((t["x"] - x_start) * ts, (t["y"] - y_start) * ts))
+        crop_box = (max(0, min(w - 1, int(math.floor(lon_to_tile_x(west, zoom) * ts - x_start * ts)))), max(0, min(h - 1, int(math.floor(lat_to_tile_y(north, zoom) * ts - y_start * ts)))), max(1, min(w, int(math.ceil(lon_to_tile_x(east, zoom) * ts - x_start * ts)))), max(1, min(h, int(math.ceil(lat_to_tile_y(south, zoom) * ts - y_start * ts)))))
+        if crop_box[2] <= crop_box[0] or crop_box[3] <= crop_box[1]: raise RuntimeError("AOI crop empty.")
+        stitched = stitched.crop(crop_box); w, h = stitched.size
+        snapped_west, snapped_east, snapped_south, snapped_north = west, east, south, north
+    
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:19]
+    filename = f"map_capture_{timestamp}.png"
+    filepath = os.path.join("uploads", filename)
+    os.makedirs("uploads", exist_ok=True)
+    stitched.save(filepath)
+    snapped_bounds = {"west": float(snapped_west), "south": float(snapped_south), "east": float(snapped_east), "north": float(snapped_north), "crs": "EPSG:4326", "zoom": int(zoom), "service": service_id, "image_width": int(w), "image_height": int(h)}
+    
+    training_state.image_path, training_state.image_url, training_state.image_width, training_state.image_height, training_state.image_bounds_latlon, training_state.image_crs = filepath, f"/uploads/{filename}", w, h, snapped_bounds, "EPSG:4326"
+    if project_id: update_project(project_id, {"image_path": filepath, "bounds": snapped_bounds, "crs": "EPSG:4326"})
+    return {"success": True, "filepath": filepath, "image_url": training_state.image_url, "width": w, "height": h, "bounds": snapped_bounds, "crs": "EPSG:4326", "zoom": zoom}
+
 @app.post("/api/map/capture", dependencies=[Depends(require_api_key)])
 async def capture_map_area(data: Dict):
     try:
         bounds, zoom, service_id, project_id = data.get("bounds"), max(15, int(data.get("zoom", 12))), data.get("service_id", training_state.current_map_service), data.get("project_id", training_state.current_project_id)
         if not bounds: return JSONResponse({"error": "No bounds"}, status_code=400)
-        service = MAP_SERVICES.get(service_id) or MAP_SERVICES.get(DEFAULT_MAP_SERVICE)
-        if not service: return JSONResponse({"success": False, "error": "No basemap service available."}, status_code=503)
-        
-        tile_url, north, south, east, west = service["url"], float(bounds["north"]), float(bounds["south"]), float(bounds["east"]), float(bounds["west"])
-        
-        def lon_to_tile_x(lon, z): return (lon + 180.0) / 360.0 * (2 ** z)
-        def lat_to_tile_y(lat, z): return (1.0 - math.log(math.tan(math.radians(lat)) + 1.0 / math.cos(math.radians(lat))) / math.pi) / 2.0 * (2 ** z)
-        def tile_x_to_lon(tx, z): return tx / (2 ** z) * 360.0 - 180.0
-        def tile_y_to_lat(ty, z): return math.degrees(math.atan(math.sinh(math.pi - 2.0 * math.pi * ty / (2 ** z))))
-        
-        use_arcgis = bool(service.get("upstream")) or str(tile_url).startswith("/api/basemap/")
-        if use_arcgis:
-            import arcgis_service
-            if not arcgis_service.is_configured(): return JSONResponse({"success": False, "error": "IGA imagery proxy not configured."}, status_code=503)
-            px_per_deg = 256.0 * (2 ** zoom) / 360.0
-            req_w, req_h = max(16, int(round((east - west) * px_per_deg))), max(16, int(round((north - south) * px_per_deg * math.cos(math.radians((north + south) / 2.0)))))
-            if max(req_w, req_h) > 4096:
-                k = 4096 / float(max(req_w, req_h)); req_w, req_h = max(16, int(req_w * k)), max(16, int(req_h * k))
-            try: 
-                raw = arcgis_service.export_image((west, south, east, north), size=(req_w, req_h), bbox_sr=4326, image_sr=4326, image_format="png")
-                stitched = Image.open(BytesIO(raw)).convert("RGB")
-            except Exception as exc: 
-                return JSONResponse({"success": False, "error": f"ArcGIS exportImage failed: {exc}", "hint": "Call /api/arcgis/diagnostic for the cause."}, status_code=502)
-            w, h, snapped_west, snapped_east, snapped_south, snapped_north = stitched.size[0], stitched.size[1], west, east, south, north
-        else:
-            x_start, x_end, y_start, y_end = int(math.floor(lon_to_tile_x(west, zoom))), int(math.floor(lon_to_tile_x(east, zoom))), int(math.floor(lat_to_tile_y(north, zoom))), int(math.floor(lat_to_tile_y(south, zoom)))
-            tile_count = (x_end - x_start + 1) * (y_end - y_start + 1)
-            if tile_count > 400: return JSONResponse({"success": False, "error": f"Capture area too large ({tile_count} tiles). Zoom in or draw a smaller AOI."}, status_code=400)
-            snapped_west, snapped_east, snapped_north, snapped_south = tile_x_to_lon(x_start, zoom), tile_x_to_lon(x_end + 1, zoom), tile_y_to_lat(y_start, zoom), tile_y_to_lat(y_end + 1, zoom)
-            tiles = []
-            for x in range(x_start, x_end + 1):
-                for y in range(y_start, y_end + 1):
-                    url = tile_url.replace("{s}", "a").replace("{z}", str(zoom)).replace("{x}", str(x)).replace("{y}", str(y))
-                    try:
-                        r = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
-                        if r.status_code == 200: tiles.append({"image": Image.open(BytesIO(r.content)), "x": x, "y": y})
-                    except Exception: pass
-            if not tiles: return JSONResponse({"success": False, "error": "No tiles downloaded"}, status_code=400)
-            ts, w, h = 256, (x_end - x_start + 1) * 256, (y_end - y_start + 1) * 256
-            stitched = Image.new("RGB", (w, h))
-            for t in tiles: stitched.paste(t["image"], ((t["x"] - x_start) * ts, (t["y"] - y_start) * ts))
-            crop_box = (max(0, min(w - 1, int(math.floor(lon_to_tile_x(west, zoom) * ts - x_start * ts)))), max(0, min(h - 1, int(math.floor(lat_to_tile_y(north, zoom) * ts - y_start * ts)))), max(1, min(w, int(math.ceil(lon_to_tile_x(east, zoom) * ts - x_start * ts)))), max(1, min(h, int(math.ceil(lat_to_tile_y(south, zoom) * ts - y_start * ts)))))
-            if crop_box[2] <= crop_box[0] or crop_box[3] <= crop_box[1]: return JSONResponse({"success": False, "error": "AOI crop empty."}, status_code=400)
-            stitched = stitched.crop(crop_box); w, h = stitched.size
-            snapped_west, snapped_east, snapped_south, snapped_north = west, east, south, north
-        
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S"); filename = f"map_capture_{timestamp}.png"; filepath = os.path.join("uploads", filename); stitched.save(filepath)
-        snapped_bounds = {"west": float(snapped_west), "south": float(snapped_south), "east": float(snapped_east), "north": float(snapped_north), "crs": "EPSG:4326", "zoom": int(zoom), "service": service_id, "image_width": int(w), "image_height": int(h)}
-        
-        training_state.image_path, training_state.image_url, training_state.image_width, training_state.image_height, training_state.image_bounds_latlon, training_state.image_crs = filepath, f"/uploads/{filename}", w, h, snapped_bounds, "EPSG:4326"
-        if project_id: update_project(project_id, {"image_path": filepath, "bounds": snapped_bounds, "crs": "EPSG:4326"})
-        
-        return JSONResponse({"success": True, "filepath": filepath, "image_url": training_state.image_url, "width": w, "height": h, "bounds": snapped_bounds, "crs": "EPSG:4326", "zoom": zoom})
+        res = capture_map_image(bounds, zoom, service_id, project_id)
+        return JSONResponse(res)
     except Exception as e:
         traceback.print_exc(); return JSONResponse({"error": str(e)}, status_code=500)
 
@@ -1277,11 +1284,18 @@ async def save_location(data: Dict):
 @app.post("/api/dataset/plan-aoi", dependencies=[Depends(require_api_key)])
 async def plan_label_cluster_aois(data: Dict):
     try:
-        from shapely.geometry import shape, box, mapping
-        from shapely.ops import transform as shp_transform
+        from shapely.geometry import shape, box, mapping, MultiPolygon, Polygon
+        from shapely.ops import unary_union, transform as shp_transform
         from pyproj import CRS, Transformer
         features, active_label = data.get("features") or [], str(data.get("active_label") or "").strip()
         if not features: return JSONResponse({"success": False, "error": "No label geometries supplied."}, status_code=400)
+        
+        do_cluster = bool(data.get("cluster", False))
+        cluster_distance_m = float(data.get("cluster_distance_m", 150.0))
+        aoi_buffer_m = float(data.get("aoi_buffer_m", 25.0))
+        min_cluster_ann = int(data.get("min_cluster_annotations", 5))
+        bounds_clip = data.get("bounds")
+
         valid, available_labels = [], set()
         for feature in features:
             geom_json, props = feature.get("geometry"), feature.get("properties") or {}
@@ -1293,18 +1307,108 @@ async def plan_label_cluster_aois(data: Dict):
                 geom = shape(geom_json)
                 if geom.is_empty: continue
                 if not geom.is_valid: geom = geom.buffer(0)
-                if not geom.is_empty: valid.append(geom)
+                if not geom.is_empty: valid.append((geom, feature))
             except Exception: continue
         if not valid: return JSONResponse({"success": False, "error": f"No valid annotations found for active label '{active_label}'. Available: {', '.join(sorted(available_labels)) or 'none'}"}, status_code=400)
-        bounds = [g.bounds for g in valid]; min_lon, min_lat, max_lon, max_lat = min(b[0] for b in bounds), min(b[1] for b in bounds), max(b[2] for b in bounds), max(b[3] for b in bounds)
-        metric = CRS.from_proj4(f"+proj=aeqd +lat_0={(min_lat+max_lat)/2.0} +lon_0={(min_lon+max_lon)/2.0} +datum=WGS84 +units=m +no_defs")
-        forward, inverse = Transformer.from_crs("EPSG:4326", metric, always_xy=True).transform, Transformer.from_crs(metric, "EPSG:4326", always_xy=True).transform
-        projected = [shp_transform(forward, g) for g in valid]
-        left, bottom, right, top = min(g.bounds[0] for g in projected), min(g.bounds[1] for g in projected), max(g.bounds[2] for g in projected), max(g.bounds[3] for g in projected)
-        label_extent = box(left, bottom, right, top)
-        aoi_wgs84, extent_wgs84 = shp_transform(inverse, label_extent.buffer(1.0, cap_style=3, join_style=2)), shp_transform(inverse, label_extent)
-        west, south, east, north = aoi_wgs84.bounds
-        return JSONResponse({"success": True, "aoi_count": 1, "annotation_count": len(valid), "active_label": active_label or "annotation", "aoi_buffer_m": 1.0, "extent_method": "selected_label_extreme_bounds", "label_extrema_m": {"left": float(left), "bottom": float(bottom), "right": float(right), "top": float(top)}, "aois": [{"geometry": mapping(aoi_wgs84), "bounds": {"west": west, "south": south, "east": east, "north": north}, "annotation_count": len(valid), "label_extent": mapping(extent_wgs84)}]})
+
+        # Optional bounds clipping (e.g. current map extent or user selected boundary)
+        if bounds_clip:
+            try:
+                clip_box = box(float(bounds_clip["west"]), float(bounds_clip["south"]), float(bounds_clip["east"]), float(bounds_clip["north"]))
+                valid = [(g, f) for g, f in valid if g.intersects(clip_box)]
+            except Exception: pass
+        if not valid: return JSONResponse({"success": False, "error": "No annotations found within the specified boundary/view."}, status_code=400)
+
+        geoms = [g for g, _ in valid]
+        bounds = [g.bounds for g in geoms]
+        lon0 = sum((b[0]+b[2])/2.0 for b in bounds)/len(bounds)
+        lat0 = sum((b[1]+b[3])/2.0 for b in bounds)/len(bounds)
+        metric = CRS.from_proj4(f"+proj=aeqd +lat_0={lat0} +lon_0={lon0} +datum=WGS84 +units=m +no_defs")
+        forward = Transformer.from_crs("EPSG:4326", metric, always_xy=True).transform
+        inverse = Transformer.from_crs(metric, "EPSG:4326", always_xy=True).transform
+
+        projected = [(shp_transform(forward, g), f) for g, f in valid]
+
+        if do_cluster:
+            # Fast spatial clustering using buffer-merge
+            buffered = [pg.buffer(cluster_distance_m / 2.0) for pg, _ in projected]
+            merged = unary_union(buffered)
+
+            if isinstance(merged, Polygon):
+                cluster_geoms = [merged]
+            elif isinstance(merged, MultiPolygon):
+                cluster_geoms = list(merged.geoms)
+            else:
+                cluster_geoms = []
+
+            aois = []
+            for idx, cg in enumerate(cluster_geoms):
+                matching = [f for pg, f in projected if cg.intersects(pg)]
+                if len(matching) < min_cluster_ann:
+                    continue
+                matching_pgs = [pg for pg, f in projected if cg.intersects(pg)]
+                m_bounds = [mg.bounds for mg in matching_pgs]
+                left = min(b[0] for b in m_bounds) - aoi_buffer_m
+                bottom = min(b[1] for b in m_bounds) - aoi_buffer_m
+                right = max(b[2] for b in m_bounds) + aoi_buffer_m
+                top = max(b[3] for b in m_bounds) + aoi_buffer_m
+                
+                aoi_box = box(left, bottom, right, top)
+                aoi_wgs84 = shp_transform(inverse, aoi_box)
+                w, s, e, n = aoi_wgs84.bounds
+                aois.append({
+                    "id": f"aoi_cluster_{idx+1}",
+                    "name": f"AOI #{idx+1}",
+                    "bounds": {"west": float(w), "south": float(s), "east": float(e), "north": float(n)},
+                    "geometry": mapping(aoi_wgs84),
+                    "annotation_count": len(matching),
+                    "label": active_label or "annotation",
+                    "is_cluster": True
+                })
+
+            aois.sort(key=lambda a: a["annotation_count"], reverse=True)
+            if not aois:
+                left, bottom, right, top = min(g.bounds[0] for g, _ in projected), min(g.bounds[1] for g, _ in projected), max(g.bounds[2] for g, _ in projected), max(g.bounds[3] for g, _ in projected)
+                label_extent = box(left - aoi_buffer_m, bottom - aoi_buffer_m, right + aoi_buffer_m, top + aoi_buffer_m)
+                aoi_wgs84 = shp_transform(inverse, label_extent)
+                w, s, e, n = aoi_wgs84.bounds
+                aois = [{
+                    "id": "aoi_cluster_1",
+                    "name": "AOI #1",
+                    "bounds": {"west": float(w), "south": float(s), "east": float(e), "north": float(n)},
+                    "geometry": mapping(aoi_wgs84),
+                    "annotation_count": len(valid),
+                    "label": active_label or "annotation"
+                }]
+
+            return JSONResponse({
+                "success": True,
+                "aoi_count": len(aois),
+                "aois": aois,
+                "active_label": active_label or "annotation",
+                "cluster_mode": True,
+                "total_annotations_clustered": sum(a["annotation_count"] for a in aois)
+            })
+        else:
+            left, bottom, right, top = min(g.bounds[0] for g, _ in projected), min(g.bounds[1] for g, _ in projected), max(g.bounds[2] for g, _ in projected), max(g.bounds[3] for g, _ in projected)
+            label_extent = box(left, bottom, right, top)
+            aoi_wgs84, extent_wgs84 = shp_transform(inverse, label_extent.buffer(1.0, cap_style=3, join_style=2)), shp_transform(inverse, label_extent)
+            west, south, east, north = aoi_wgs84.bounds
+            return JSONResponse({
+                "success": True,
+                "aoi_count": 1,
+                "annotation_count": len(valid),
+                "active_label": active_label or "annotation",
+                "aoi_buffer_m": 1.0,
+                "extent_method": "selected_label_extreme_bounds",
+                "label_extrema_m": {"left": float(left), "bottom": float(bottom), "right": float(right), "top": float(top)},
+                "aois": [{
+                    "geometry": mapping(aoi_wgs84),
+                    "bounds": {"west": west, "south": south, "east": east, "north": north},
+                    "annotation_count": len(valid),
+                    "label_extent": mapping(extent_wgs84)
+                }]
+            })
     except Exception as exc:
         traceback.print_exc(); return JSONResponse({"success": False, "error": str(exc)}, status_code=400)
 
@@ -1312,23 +1416,128 @@ async def plan_label_cluster_aois(data: Dict):
 async def build_dataset_api(data: Dict):
     try:
         project_id, tile_size, overlap = data.get("project_id") or training_state.current_project_id, int(data.get("tile_size", 256)), float(data.get("overlap", 0.2))
-        label, features, bounds, image_path = data.get("label") or training_state.current_label or training_state.selected_label, data.get("features", []), data.get("bounds") or training_state.image_bounds_latlon, data.get("image_path") or training_state.image_path
+        label, features = data.get("label") or training_state.current_label or training_state.selected_label, data.get("features", [])
         if not project_id or not label: return JSONResponse({"success": False, "error": "Project ID and Label required"}, status_code=400)
         project = get_project(project_id)
         if not project: return JSONResponse({"success": False, "error": "Project not found"}, status_code=404)
         dataset_model_type = normalize_model_type(str(data.get("model_type_key") or data.get("model_type") or project.get("model_type_key") or project.get("model_type") or "unet").strip().lower().replace(" ", "_"))
         training_state.model_type = dataset_model_type
+        
         if not features:
             ap = training_state.annotation_file_path or project.get("annotation_path")
             if ap and os.path.exists(ap):
                 with open(ap, "r") as f: d = json.load(f)
                 features = d.get("features", [])
-                if not bounds: bounds = d.get("bounds")
         if not features: return JSONResponse({"success": False, "error": "No annotations"}, status_code=400)
+
+        safe_label = label.lower().replace(" ", "_")
+        class_names = dedupe_labels(project.get("labels", ["background"]))
+        if safe_label not in {c.lower().replace(" ", "_") for c in class_names}: class_names.append(safe_label); class_names = dedupe_labels(class_names)
+        from utils.dataset_builder import DatasetBuilder
+        from shapely.geometry import shape, box, mapping
+
+        aois = data.get("aois")
+        # --- MULTI-AOI WORKFLOW ---
+        if isinstance(aois, list) and len(aois) > 0:
+            capture_zoom = max(15, int(data.get("capture_zoom", training_state.current_zoom or 17)))
+            service_id = data.get("service_id", training_state.current_map_service)
+            total_chips = 0
+            all_stats = {}
+            last_metadata = {}
+            aoi_success_count = 0
+            
+            for idx, aoi in enumerate(aois):
+                aoi_bounds = aoi.get("bounds")
+                if not aoi_bounds: continue
+                
+                # 1. Capture imagery for this specific AOI
+                try:
+                    cap_res = capture_map_image(aoi_bounds, capture_zoom, service_id, project_id)
+                    aoi_img_path = cap_res["filepath"]
+                    aoi_snapped_bounds = cap_res["bounds"]
+                except Exception as cap_err:
+                    print(f"⚠️ AOI {idx+1} capture failed: {cap_err}")
+                    continue
+                
+                # 2. Filter features intersecting this AOI
+                try:
+                    aoi_geom = aoi.get("geometry")
+                    aoi_shape = shape(aoi_geom) if aoi_geom else box(float(aoi_bounds["west"]), float(aoi_bounds["south"]), float(aoi_bounds["east"]), float(aoi_bounds["north"]))
+                    active_name = str(label).strip().casefold()
+                    filtered_features = []
+                    for f in features:
+                        props = f.get("properties") or {}
+                        if str(props.get("class_name") or props.get("label") or props.get("class") or active_name).strip().casefold() != active_name: continue
+                        g_json = f.get("geometry")
+                        if not g_json: continue
+                        geom = shape(g_json)
+                        if not geom.is_valid: geom = geom.buffer(0)
+                        clipped = geom.intersection(aoi_shape)
+                        if clipped.is_empty: continue
+                        out_f = dict(f); out_f["geometry"] = mapping(clipped); filtered_features.append(out_f)
+                except Exception as clip_err:
+                    print(f"⚠️ AOI {idx+1} clipping failed: {clip_err}")
+                    continue
+                
+                if not filtered_features:
+                    print(f"ℹ️ AOI {idx+1} has 0 intersecting features. Skipping.")
+                    continue
+                
+                # 3. Build chips with unique prefix and append=(aoi_success_count > 0)
+                try:
+                    builder = DatasetBuilder(
+                        source_image_path=aoi_img_path,
+                        features=filtered_features,
+                        class_names=class_names,
+                        tile_size=tile_size,
+                        overlap=overlap,
+                        bounds=aoi_snapped_bounds,
+                        label=safe_label,
+                        model_type=dataset_model_type,
+                        task_type=project.get("task_type"),
+                        chip_prefix=f"aoi{idx+1:02d}_"
+                    )
+                    dataset_dir, last_metadata, last_stats = builder.build_dataset(
+                        output_dir=ensure_label_folders(safe_label),
+                        append=(aoi_success_count > 0)
+                    )
+                    total_chips = last_metadata.get("total_chips", total_chips)
+                    all_stats = last_stats
+                    aoi_success_count += 1
+                except Exception as build_err:
+                    print(f"⚠️ AOI {idx+1} dataset builder error: {build_err}")
+                    continue
+
+            if aoi_success_count == 0:
+                return JSONResponse({"success": False, "error": "No chips could be generated from the selected AOIs. Ensure annotations intersect the AOI boundaries."}, status_code=400)
+            
+            training_state.total_chips, training_state.class_names, training_state.num_classes, training_state.dataset_dir, training_state.tile_size = total_chips, class_names, len(class_names), os.path.join(ensure_label_folders(safe_label), "dataset"), tile_size
+            if not training_state.current_label: training_state.current_label, training_state.selected_label = safe_label, safe_label
+            update_project(project_id, {"chips_count": total_chips, "labels": class_names, "dataset_dir": training_state.dataset_dir, "model_type": project.get("model_type", dataset_model_type), "model_type_key": dataset_model_type})
+            training_state.readiness = check_training_readiness(project_id, safe_label, tile_size)
+            
+            return JSONResponse({
+                "success": True,
+                "dataset_dir": training_state.dataset_dir,
+                "total_chips": total_chips,
+                "num_aois": aoi_success_count,
+                "stats": all_stats,
+                "class_names": class_names,
+                "num_classes": len(class_names),
+                "tile_size": tile_size,
+                "model_type": dataset_model_type,
+                "model_family": last_metadata.get("model_family"),
+                "primary_target": last_metadata.get("primary_target"),
+                "target_manifest": last_metadata.get("target_manifest_file"),
+                "chip_previews": last_metadata.get("chip_previews", []),
+                "readiness": training_state.readiness
+            })
+
+        # --- SINGLE AOI / EXISTING WORKFLOW ---
+        bounds, image_path = data.get("bounds") or training_state.image_bounds_latlon, data.get("image_path") or training_state.image_path
         aoi_geometry = data.get("aoi_geometry")
         if data.get("is_aoi") and aoi_geometry:
             try:
-                from shapely.geometry import shape, mapping
                 aoi_shape, filtered_features, active_name = shape(aoi_geometry), [], str(label).strip().casefold()
                 for feature in features:
                     props = feature.get("properties") or {}
@@ -1341,15 +1550,11 @@ async def build_dataset_api(data: Dict):
                     if clipped.is_empty: continue
                     out_feature = dict(feature); out_feature["geometry"] = mapping(clipped); filtered_features.append(out_feature)
                 features = filtered_features
-                if not features: return JSONResponse({"success": False, "error": "No selected-label annotations intersect the red dashed AOI."}, status_code=400)
+                if not features: return JSONResponse({"success": False, "error": "No selected-label annotations intersect the AOI boundary."}, status_code=400)
             except Exception as clip_exc: return JSONResponse({"success": False, "error": f"AOI annotation clipping failed: {clip_exc}"}, status_code=400)
         img_path = image_path or project.get("image_path")
         if not img_path or not os.path.exists(img_path): return JSONResponse({"success": False, "error": "No image. Capture a map area first."}, status_code=400)
         if not bounds: w, h = Image.open(img_path).size; bounds = {"west": 0, "south": h, "east": w, "north": 0}
-        safe_label = label.lower().replace(" ", "_")
-        class_names = dedupe_labels(project.get("labels", ["background"]))
-        if safe_label not in {c.lower().replace(" ", "_") for c in class_names}: class_names.append(safe_label); class_names = dedupe_labels(class_names)
-        from utils.dataset_builder import DatasetBuilder
         builder = DatasetBuilder(source_image_path=img_path, features=features, class_names=class_names, tile_size=tile_size, overlap=overlap, bounds=bounds, label=safe_label, model_type=dataset_model_type, task_type=project.get("task_type"))
         dataset_dir, metadata, chip_stats = builder.build_dataset(output_dir=ensure_label_folders(safe_label))
         training_state.total_chips, training_state.class_names, training_state.num_classes, training_state.dataset_dir, training_state.tile_size = metadata.get("total_chips", 0), class_names, len(class_names), dataset_dir, tile_size
