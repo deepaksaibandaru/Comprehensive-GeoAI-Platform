@@ -3037,33 +3037,54 @@ async def predict_compat(data: Dict):
                 mask_np = masks.detach().cpu().numpy(); mask_np = mask_np[:, 0] if mask_np.ndim == 4 else mask_np
             
             if model_type == "mask_rcnn" or meta.get("architecture") == "MaskRCNN":
-                for i in range(len(score_np)):
-                    score = float(score_np[i])
-                    if score < threshold or mask_np is None or i >= len(mask_np): continue
-                    class_id = int(label_np[i]) if i < len(label_np) else 1
-                    class_name = _prediction_class_name(class_id, model_class_names)
-                    if class_name.lower() in ("nodata", "no_data", "background", "__background__"):
-                        class_name = prediction_label if prediction_label.lower() not in ("nodata", "no_data", "background") else "Building"
-                    mk = mask_np[i]
-                    if mk.shape != (H, W): mk = cv2.resize(mk.astype(np.float32), (W, H), interpolation=cv2.INTER_LINEAR)
-                    binary = (mk > 0.5).astype(np.uint8) * 255; contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE); produced = False
-                    for contour in contours:
-                        feat = _feature_from_polygon_contour(contour, mk, bounds, W, H, class_name, area_geo_factor=(gsd * gsd if gsd else None), confidence=score, model_iou=training_state.best_map, min_area=min_area)
+                valid_indices = [i for i in range(len(score_np)) if float(score_np[i]) >= threshold and mask_np is not None and i < len(mask_np)]
+                if valid_indices:
+                    valid_indices.sort(key=lambda idx: float(score_np[idx]), reverse=True)
+                    combined_mask = np.zeros((H, W), dtype=np.uint8)
+                    conf_map = np.zeros((H, W), dtype=np.float32)
+
+                    for i in valid_indices:
+                        mk = mask_np[i]
+                        if mk.shape != (H, W): mk = cv2.resize(mk.astype(np.float32), (W, H), interpolation=cv2.INTER_LINEAR)
+                        binary = (mk > 0.5).astype(np.uint8)
+                        combined_mask = np.maximum(combined_mask, binary)
+                        conf_map = np.maximum(conf_map, binary.astype(np.float32) * float(score_np[i]))
+
+                    if morph_close:
+                        combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5)), iterations=1)
+                    if smooth_sigma > 0:
+                        blurred = cv2.GaussianBlur(combined_mask.astype(np.float32), (5, 5), sigmaX=smooth_sigma, sigmaY=smooth_sigma)
+                        combined_mask = (blurred > 0.4).astype(np.uint8)
+
+                    num_labels, comp_labels, comp_stats, _ = cv2.connectedComponentsWithStats(combined_mask, connectivity=8)
+                    for comp_id in range(1, num_labels):
+                        c_area = int(comp_stats[comp_id, cv2.CC_STAT_AREA])
+                        if c_area < min_area: continue
+                        comp_mask = (comp_labels == comp_id).astype(np.uint8)
+                        contours, _ = cv2.findContours(comp_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                        if not contours: continue
+                        max_cnt = max(contours, key=cv2.contourArea)
+                        c_conf = float(np.max(conf_map[comp_labels == comp_id])) if np.any(comp_labels == comp_id) else float(threshold)
+
+                        feat = _feature_from_polygon_contour(
+                            max_cnt, comp_mask, bounds, W, H, prediction_label,
+                            area_geo_factor=(gsd * gsd if gsd else None),
+                            confidence=c_conf,
+                            model_iou=training_state.best_map,
+                            min_area=min_area,
+                            simplify_tolerance=simplify_tolerance
+                        )
                         if feat is not None:
                             feat["properties"]["instance_id"] = len(features) + 1
-                            feat["properties"]["class_id"] = class_id
-                            feat["properties"]["class_name"] = class_name
-                            feat["properties"]["label"] = class_name
-                            if len(box_np) > i:
-                                bx = box_np[i]
-                                feat["properties"]["pix_bbox"] = f"{bx[0]:.1f},{bx[1]:.1f},{bx[2]:.1f},{bx[3]:.1f}"
+                            feat["properties"]["class_id"] = 1
+                            feat["properties"]["class_name"] = prediction_label
+                            feat["properties"]["label"] = prediction_label
                             try:
                                 poly = ShapelyPolygon(feat["geometry"]["coordinates"][0])
                                 b = poly.bounds
                                 feat["bbox"] = [round(b[0], 7), round(b[1], 7), round(b[2], 7), round(b[3], 7)]
                             except Exception: pass
-                            features.append(feat); produced = True
-                    if produced: raw_count += 1
+                            features.append(feat); raw_count += 1
             else:
                 for i, score in enumerate(score_np):
                     score = float(score)
