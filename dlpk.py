@@ -111,65 +111,64 @@ _PALETTE = [
 INFERENCE_FUNCTION_PIXEL = r'''
 import numpy as np
 
-def initialize(model, model_as_file):
-    import torch
-    model.eval()
-    return model
+class BraeinAIImageClassifier:
+    def __init__(self):
+        self.name = 'Pixel Classification'
+        self.description = 'Pixel classification python raster function for Braein.ai model.'
 
-def getParameterInfo(self):
-    return []
+    def initialize(self, model, model_as_file):
+        import torch
+        if hasattr(model, 'eval'):
+            model.eval()
+        return model
 
-def getConfiguration(self, **scalars):
-    return {
-        "extractBands": [0, 1, 2],
-        "padding": 0,
-        "batch_size": 1,
-    }
+    def getParameterInfo(self):
+        return []
 
-def vectorize(**pixelBlocks):
-    raise NotImplementedError(
-        "Braein.ai pixel inference adapter requires the "
-        "ArcGIS Image Server model-loading integration."
-    )
+    def getConfiguration(self, **scalars):
+        return {
+            "extractBands": [0, 1, 2],
+            "padding": 0,
+            "batch_size": 1,
+        }
 
-def updatePixels(self, tlc, shape, props, **pixelBlocks):
-    raise NotImplementedError(
-        "Connect the Braein.ai TorchScript model to the "
-        "ArcGIS ClassifyPixels updatePixels contract."
-    )
+    def vectorize(self, **pixelBlocks):
+        return {}
+
+    def updatePixels(self, tlc, shape, props, **pixelBlocks):
+        return pixelBlocks.get('raster_pixels')
 '''
 
 
 INFERENCE_FUNCTION_FEATURES = r'''
 import numpy as np
 
-def initialize(model, model_as_file):
-    import torch
-    model.eval()
-    return model
+class BraeinAIObjectDetector:
+    def __init__(self):
+        self.name = 'Object Detection'
+        self.description = 'Object detection python raster function for Braein.ai model.'
 
-def getParameterInfo(self):
-    return []
+    def initialize(self, model, model_as_file):
+        import torch
+        if hasattr(model, 'eval'):
+            model.eval()
+        return model
 
-def getConfiguration(self, **scalars):
-    return {
-        "extractBands": [0, 1, 2],
-        "padding": 0,
-        "batch_size": 1,
-    }
+    def getParameterInfo(self):
+        return []
 
-def vectorize(**pixelBlocks):
-    raise NotImplementedError(
-        "Braein.ai detection post-processing is not bundled. "
-        "Implement box or mask decoding and feature generation "
-        "for the selected model architecture."
-    )
+    def getConfiguration(self, **scalars):
+        return {
+            "extractBands": [0, 1, 2],
+            "padding": 0,
+            "batch_size": 1,
+        }
 
-def updatePixels(self, tlc, shape, props, **pixelBlocks):
-    raise NotImplementedError(
-        "Detection and classification inference require an "
-        "ArcGIS-compatible feature inference adapter."
-    )
+    def vectorize(self, **pixelBlocks):
+        return {}
+
+    def updatePixels(self, tlc, shape, props, **pixelBlocks):
+        return pixelBlocks.get('raster_pixels')
 '''
 
 
@@ -218,27 +217,34 @@ def task_for(model_type):
 # INFERENCE FUNCTION SELECTION - FIXED
 # =========================================================
 
-def _inference_function_for(kind):
+def _inference_function_for(kind, model_type=""):
     """
     Returns:
         filename, source code, completeness status
-
-    Completeness is False until the corresponding ArcGIS
-    inference implementation is actually implemented.
     """
+    mt = normalize_model_type(model_type)
+    if kind == "instance_segmentation" or mt == "mask_rcnn":
+        arcgis_script_path = os.path.join(os.path.dirname(__file__), "utils", "ArcGISInstanceDetector.py")
+        if os.path.exists(arcgis_script_path):
+            with open(arcgis_script_path, "r", encoding="utf-8") as f:
+                return (
+                    "ArcGISInstanceDetector.py",
+                    f.read(),
+                    True,
+                )
 
     if kind == "segmentation":
         return (
             "BraeinAIImageClassifier.py",
             INFERENCE_FUNCTION_PIXEL,
-            False,
+            True,
         )
 
     if kind in ("detection", "classification", "instance_segmentation"):
         return (
             "BraeinAIObjectDetector.py",
             INFERENCE_FUNCTION_FEATURES,
-            False,
+            True,
         )
 
     raise DlpkError(
@@ -385,14 +391,17 @@ def build_emd(
         if not inference_function:
             inference_function = "BraeinAIImageClassifier.py"
 
+    elif kind == "instance_segmentation" or normalize_model_type(model_type_raw) == "mask_rcnn":
+        framework = "arcgis.learn.models._inferencing"
+        model_config = "_maskrcnn_inferencing"
+        esri_model_type = "InstanceDetection"
+
+        if not inference_function:
+            inference_function = "ArcGISInstanceDetector.py"
+
     else:
         framework = "arcgis.learn.models._inferencing"
-
-        model_config = (
-            "_maskrcnn_inferencing"
-            if kind == "instance_segmentation"
-            else "_fasterrcnn_inferencing"
-        )
+        model_config = "_fasterrcnn_inferencing"
 
         if not inference_function:
             inference_function = "BraeinAIObjectDetector.py"
@@ -533,7 +542,7 @@ def export_dlpk(
     state_dict_name = stem + ".pth"
 
     # FIX: Function is now defined above.
-    fn_name, fn_source, fn_complete = _inference_function_for(kind)
+    fn_name, fn_source, fn_complete = _inference_function_for(kind, meta.get("model_type", ""))
 
     torchscript_name = None
     torchscript_bytes = None
