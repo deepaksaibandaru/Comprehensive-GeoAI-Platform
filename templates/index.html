@@ -415,45 +415,14 @@
                                     <span id="aoiCountBadge" class="badge" style="background:#8b5cf6;font-size:10px;display:none;">0 AOIs</span>
                                 </div>
 
-                                <!-- AOI Action Buttons -->
-                                <div style="display:flex;gap:4px;margin-bottom:8px;flex-wrap:wrap;">
+                                <!-- Simple AOI Action Buttons -->
+                                <div style="display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap;">
                                     <button type="button" class="btn btn-sm btn-info" id="btnDrawAoi" onclick="toggleDrawAoiMode()" title="Draw an Area of Interest boundary on the map">
                                         <i class="fas fa-vector-square"></i> + Draw AOI
-                                    </button>
-                                    <button type="button" class="btn btn-sm btn-primary" id="btnClusterAoi" onclick="toggleClusterOptions()" title="Divide large extent or annotations into multiple compact cluster AOIs">
-                                        <i class="fas fa-cubes"></i> ⚡ Cluster AOI
                                     </button>
                                     <button type="button" class="btn btn-sm btn-secondary" onclick="clearAllUserAois()" title="Clear all drawn AOIs">
                                         <i class="fas fa-trash-alt"></i> Clear AOIs
                                     </button>
-                                </div>
-
-                                <!-- Cluster AOI Options Panel -->
-                                <div id="clusterAoiOptions" style="display:none;background:#0a0e17;border:1px solid #1e293b;border-radius:4px;padding:8px;margin-bottom:8px;font-size:10px;">
-                                    <div style="font-weight:600;color:#c084fc;margin-bottom:6px;"><i class="fas fa-magic"></i> Cluster AOI Settings</div>
-                                    <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;flex-wrap:wrap;">
-                                        <div style="display:flex;align-items:center;gap:3px;">
-                                            <label style="color:#94a3b8;min-width:auto;margin:0;">Distance:</label>
-                                            <input type="number" id="clusterDistMeters" value="150" min="20" max="2000" step="10" style="width:50px;font-size:10px;padding:2px 4px;height:22px;"> <span style="color:#64748b;">m</span>
-                                        </div>
-                                        <div style="display:flex;align-items:center;gap:3px;">
-                                            <label style="color:#94a3b8;min-width:auto;margin:0;">Buffer:</label>
-                                            <input type="number" id="clusterBufferMeters" value="25" min="0" max="500" step="5" style="width:45px;font-size:10px;padding:2px 4px;height:22px;"> <span style="color:#64748b;">m</span>
-                                        </div>
-                                        <div style="display:flex;align-items:center;gap:3px;">
-                                            <label style="color:#94a3b8;min-width:auto;margin:0;">Min:</label>
-                                            <input type="number" id="clusterMinLabels" value="5" min="1" max="100" style="width:42px;font-size:10px;padding:2px 4px;height:22px;" title="Minimum annotations per cluster">
-                                        </div>
-                                    </div>
-                                    <div style="margin-bottom:6px;">
-                                        <label style="color:#94a3b8;cursor:pointer;display:inline-flex;align-items:center;gap:4px;font-size:10px;">
-                                            <input type="checkbox" id="clusterInCurrentViewOnly" checked style="margin:0;"> Cluster inside current map view only
-                                        </label>
-                                    </div>
-                                    <div style="display:flex;gap:4px;">
-                                        <button type="button" class="btn btn-primary btn-xs" onclick="executeClusterAOIs()"><i class="fas fa-bolt"></i> Generate Clusters</button>
-                                        <button type="button" class="btn btn-secondary btn-xs" onclick="toggleClusterOptions(false)">Cancel</button>
-                                    </div>
                                 </div>
 
                                 <!-- Defined AOIs List -->

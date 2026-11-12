@@ -861,19 +861,22 @@ function countAnnotationsInBounds(bounds, labelName) {
     if (!drawnItems) return 0;
     const normalize = v => String(v || '').trim().toLowerCase();
     const targetLabel = normalize(labelName);
-    let count = 0;
+    const aoiLatLngBounds = L.latLngBounds([bounds.south, bounds.west], [bounds.north, bounds.east]);
+    let labelCount = 0, totalInside = 0;
     drawnItems.getLayers().forEach(l => {
-        const props = (l.feature && l.feature.properties) || {};
-        const lLabel = normalize(props.class_name || props.label || props.class || props.label_name || targetLabel);
-        if (targetLabel && lLabel !== targetLabel) return;
         const b = l.getBounds ? l.getBounds() : (l.getLatLng ? L.latLngBounds(l.getLatLng(), l.getLatLng()) : null);
         if (!b) return;
-        const c = b.getCenter();
-        if (c.lat >= bounds.south && c.lat <= bounds.north && c.lng >= bounds.west && c.lng <= bounds.east) {
-            count++;
+        const c = b.getCenter ? b.getCenter() : null;
+        const inside = (c && c.lat >= bounds.south && c.lat <= bounds.north && c.lng >= bounds.west && c.lng <= bounds.east) || aoiLatLngBounds.intersects(b);
+        if (!inside) return;
+        totalInside++;
+        const props = (l.feature && l.feature.properties) || {};
+        const lLabel = normalize(props.class_name || props.label || props.class || props.label_name);
+        if (!targetLabel || targetLabel === 'unlabeled' || targetLabel === 'default' || !lLabel || lLabel === targetLabel) {
+            labelCount++;
         }
     });
-    return count;
+    return labelCount > 0 ? labelCount : totalInside;
 }
 
 function toggleDrawAoiMode() {
@@ -966,7 +969,8 @@ function bindAoiEvents(aoi) {
     const layer = aoi.layer;
     if (!layer) return;
     
-    layer.bindTooltip(`${aoi.name} (${aoi.annotation_count} ${aoi.active_label})`, {
+    const countText = aoi.annotation_count > 0 ? `${aoi.annotation_count} objects` : `AOI extent`;
+    layer.bindTooltip(`${aoi.name} (${countText})`, {
         permanent: true,
         direction: 'top',
         className: 'aoi-map-label'
@@ -976,7 +980,7 @@ function bindAoiEvents(aoi) {
     popupContent.style.cssText = 'font-size:11px;min-width:140px;';
     popupContent.innerHTML = `
         <div style="font-weight:700;color:#f59e0b;margin-bottom:4px;">${aoi.name}</div>
-        <div style="color:#94a3b8;margin-bottom:6px;">${aoi.annotation_count} ${aoi.active_label} annotations</div>
+        <div style="color:#94a3b8;margin-bottom:6px;">${countText}</div>
         <div style="display:flex;gap:4px;">
             <button class="btn btn-secondary btn-xs" onclick="zoomToAoi('${aoi.id}')" title="Zoom to this AOI"><i class="fas fa-search-plus"></i> Zoom</button>
             <button class="btn btn-info btn-xs" onclick="toggleEditAoi('${aoi.id}')" title="Edit boundary"><i class="fas fa-pen"></i> Edit</button>
@@ -1013,11 +1017,12 @@ function renderAoiList() {
         const isEditing = aoi.layer && aoi.layer.editing && aoi.layer.editing.enabled && aoi.layer.editing.enabled();
         const item = document.createElement('div');
         item.className = 'aoi-item' + (isEditing ? ' active-editing' : '');
+        const countDesc = aoi.annotation_count > 0 ? `(${aoi.annotation_count} objects)` : `(extent)`;
         item.innerHTML = `
-            <div class="aoi-info" title="${aoi.name}: ${aoi.annotation_count} annotations">
+            <div class="aoi-info" title="${aoi.name}">
                 <i class="fas fa-vector-square" style="color:#f59e0b;font-size:10px;"></i>
                 <span style="font-weight:600;color:#f1f5f9;">${aoi.name}</span>
-                <span style="color:#38bdf8;font-size:9px;">(${aoi.annotation_count} ${aoi.active_label})</span>
+                <span style="color:#38bdf8;font-size:9px;">${countDesc}</span>
             </div>
             <div class="aoi-actions">
                 <button type="button" class="btn btn-secondary btn-xs" style="padding:1px 5px;height:20px;font-size:9px;" onclick="zoomToAoi('${aoi.id}')" title="Zoom to AOI">
