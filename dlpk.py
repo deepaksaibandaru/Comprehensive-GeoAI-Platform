@@ -362,25 +362,41 @@ def build_emd(
 
     names = meta.get("class_names") or ["background", "object"]
 
-    esri_classes = [
-        {
-            "Value": 0,
-            "Name": "Background",
-            "Color": [0, 0, 0],
-        },
-        {
-            "Value": 1,
-            "Name": "NoData",
-            "Color": [255, 255, 255],
-        },
-    ]
+    is_instance_or_det = (kind in ("detection", "instance_segmentation") or normalize_model_type(model_type_raw) == "mask_rcnn")
 
-    if len(names) > 1:
-        esri_classes.append({
-            "Value": 2,
-            "Name": names[1],
-            "Color": [228, 26, 28],
-        })
+    if is_instance_or_det:
+        esri_classes = []
+        fg_names = [n for n in names if n.lower() not in ("background", "default", "unknown")]
+        if not fg_names and len(names) > 1:
+            fg_names = names[1:]
+        elif not fg_names:
+            fg_names = ["object"]
+        for idx, n in enumerate(fg_names):
+            color = _PALETTE[idx % len(_PALETTE)]
+            esri_classes.append({
+                "Value": idx + 1,
+                "Name": n,
+                "Color": color,
+            })
+    else:
+        esri_classes = [
+            {
+                "Value": 0,
+                "Name": "Background",
+                "Color": [0, 0, 0],
+            },
+            {
+                "Value": 1,
+                "Name": "NoData",
+                "Color": [255, 255, 255],
+            },
+        ]
+        if len(names) > 1:
+            esri_classes.append({
+                "Value": 2,
+                "Name": names[1],
+                "Color": [228, 26, 28],
+            })
 
     mode = str(meta.get("mode", "binary")).lower()
 
@@ -406,6 +422,16 @@ def build_emd(
         if not inference_function:
             inference_function = "BraeinAIObjectDetector.py"
 
+    model_params = {
+        "mode": mode,
+        "backbone": "resnet50" if is_instance_or_det else meta.get("backbone", "unet"),
+        "backend": "pytorch",
+        "pointrend": False,
+        "num_classes": len(esri_classes),
+        "base_channels": meta.get("base_channels"),
+        "num_levels": meta.get("num_levels"),
+    }
+
     emd = {
         "Framework": framework,
         "ModelConfiguration": model_config,
@@ -418,13 +444,7 @@ def build_emd(
         "DataRange": [0.0, 1.0],
         "ImageSpaceUsed": "MAP_SPACE",
         "MetaDataMode": chip_format,
-        "ModelParameters": {
-            "mode": mode,
-            "backbone": meta.get("backbone", "unet"),
-            "num_classes": len(esri_classes),
-            "base_channels": meta.get("base_channels"),
-            "num_levels": meta.get("num_levels"),
-        },
+        "ModelParameters": model_params,
         "Description": description or (
             "%s trained in Braein.ai."
             % (meta.get("architecture") or model_type_raw)
