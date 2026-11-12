@@ -40,6 +40,7 @@ models/saved/*
 
 models/dlpk_imported/*
 !models/dlpk_imported/.gitkeep
+!models/dlpk_imported/*.part*
 
 models/imported/*
 !models/imported/.gitkeep

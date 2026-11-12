@@ -246,6 +246,12 @@ import deployment_config as depcfg  # noqa: E402
 from app import app                 # noqa: E402
 
 if __name__ == "__main__":
+    try:
+        from reassemble_models import reassemble_models
+        reassemble_models()
+    except Exception as _re_err:
+        print("[models] Note: reassemble_models: %s" % _re_err)
+
     # Start the browser opener BEFORE uvicorn so it can begin polling while
     # the app imports and initialises (that can take a few seconds).
     try:
