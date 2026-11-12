@@ -646,10 +646,10 @@
                                         <input type="number" id="predictSimplifyTolerance" value="0.008" min="0.002" max="0.03" step="0.001" style="width:70px;">
                                     </div>
                                     <div class="config-row" style="align-items:center;">
-                                        <label for="predictMorphClose">Morphological closing (3×3):</label>
-                                        <input type="checkbox" id="predictMorphClose">
+                                        <label for="predictMorphClose">Merge building parts (Close gaps):</label>
+                                        <input type="checkbox" id="predictMorphClose" checked>
                                     </div>
-                                    <div style="font-size:10px;color:#94a3b8;line-height:1.45;margin-top:6px;">Closing is off by default because it can join nearby objects. Enable only to repair small gaps.</div>
+                                    <div style="font-size:10px;color:#94a3b8;line-height:1.45;margin-top:6px;">Connects roof sections and fills internal gaps to output complete, solid building footprints.</div>
                                 </details>
                             </div>
                             <div class="config-section">

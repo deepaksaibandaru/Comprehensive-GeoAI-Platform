@@ -3050,11 +3050,20 @@ async def predict_compat(data: Dict):
                         combined_mask = np.maximum(combined_mask, binary)
                         conf_map = np.maximum(conf_map, binary.astype(np.float32) * float(score_np[i]))
 
-                    if morph_close:
-                        combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5)), iterations=1)
+                    # 1. Close seams & gaps between roof facets belonging to the same building
+                    k_size = 11 if morph_close else 7
+                    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k_size, k_size))
+                    combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+
                     if smooth_sigma > 0:
                         blurred = cv2.GaussianBlur(combined_mask.astype(np.float32), (5, 5), sigmaX=smooth_sigma, sigmaY=smooth_sigma)
                         combined_mask = (blurred > 0.4).astype(np.uint8)
+
+                    # 2. Fill internal holes (e.g. shadowed roof areas, vents, inner patios) so buildings are 100% solid
+                    ext_contours, _ = cv2.findContours(combined_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    filled_mask = np.zeros_like(combined_mask)
+                    cv2.drawContours(filled_mask, ext_contours, -1, 1, -1)
+                    combined_mask = filled_mask
 
                     num_labels, comp_labels, comp_stats, _ = cv2.connectedComponentsWithStats(combined_mask, connectivity=8)
                     for comp_id in range(1, num_labels):
