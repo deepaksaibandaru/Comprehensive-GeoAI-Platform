@@ -466,7 +466,19 @@ def _normalise_state_dict_keys(state_dict):
     if not isinstance(state_dict, dict): return state_dict
     out = state_dict
     while out and all(str(k).startswith("module.") for k in out.keys()): out = {str(k)[7:]: v for k, v in out.items()}
-    return out
+    # Convert canonical Esri Mask R-CNN keys to modern torchvision keys
+    converted = {}
+    for k, v in out.items():
+        new_k = str(k)
+        new_k = re.sub(r'roi_heads\.mask_head\.mask_fcn1\.', 'roi_heads.mask_head.0.0.', new_k)
+        new_k = re.sub(r'roi_heads\.mask_head\.mask_fcn2\.', 'roi_heads.mask_head.1.0.', new_k)
+        new_k = re.sub(r'roi_heads\.mask_head\.mask_fcn3\.', 'roi_heads.mask_head.2.0.', new_k)
+        new_k = re.sub(r'roi_heads\.mask_head\.mask_fcn4\.', 'roi_heads.mask_head.3.0.', new_k)
+        new_k = re.sub(r'backbone\.fpn\.inner_blocks\.(\d+)\.', r'backbone.fpn.inner_blocks.\1.0.', new_k)
+        new_k = re.sub(r'backbone\.fpn\.layer_blocks\.(\d+)\.', r'backbone.fpn.layer_blocks.\1.0.', new_k)
+        new_k = re.sub(r'rpn\.head\.conv\.(weight|bias)', r'rpn.head.conv.0.0.\1', new_k)
+        converted[new_k] = v
+    return converted
 
 def _read_adjacent_emd_metadata(model_path):
     """Read an Esri EMD beside an extracted DLPK checkpoint, without guessing across packages."""
@@ -633,7 +645,14 @@ def load_checkpoint(model_path, device, requested_num_classes=None):
         meta["architecture"] = model_type.capitalize()
 
         # Determine how many classes the checkpoint was trained for
-        ckpt_num_classes = int(meta.get("num_classes") or 2)
+        cls_weight = state_dict.get("roi_heads.box_predictor.cls_score.weight")
+        if cls_weight is None:
+            cls_weight = state_dict.get("detector.roi_heads.box_predictor.cls_score.weight")
+        if cls_weight is not None and hasattr(cls_weight, "shape") and len(cls_weight.shape) >= 2:
+            ckpt_num_classes = int(cls_weight.shape[0])
+            meta["num_classes"] = ckpt_num_classes
+        else:
+            ckpt_num_classes = int(meta.get("num_classes") or (len(meta.get("class_names") or [])) or 2)
         
         # NEW: If the user added new labels, we must expand the head.
         if requested_num_classes is not None and requested_num_classes > ckpt_num_classes:

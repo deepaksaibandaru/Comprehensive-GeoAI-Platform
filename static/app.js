@@ -1762,7 +1762,7 @@ function loadModel(path) {
     const cleanPath = normalizeModelPath(path || document.getElementById('modelSelect')?.value || '');
     if (!cleanPath) { addLog('warning', 'No model selected'); alert('Please select a model from the dropdown first.'); return; }
     addLog('info', 'Loading model: ' + cleanPath.split('/').pop());
-    const modalBtn = document.querySelector('#modelSelectModal .btn-create'), originalBtnText = modalBtn ? modalBtn.innerHTML : '';
+    const modalBtn = document.querySelector('#modelSelectModal .btn-create'), originalBtnText = '<i class="fas fa-upload"></i> Load Selected Model';
     if (modalBtn) { modalBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Loading...'; modalBtn.disabled = true; }
     const es = document.getElementById('evalStatus'); if (es) { es.textContent = '⏳ Loading model...'; es.style.color = '#fbbf24'; }
     const ps = document.getElementById('predictStatus'); if (ps) { ps.textContent = '⏳ Loading model...'; ps.style.color = '#fbbf24'; }

@@ -464,7 +464,6 @@ def build_emd(
         "ImageWidth": tile,
         "ExtractBands": bands,
         "Classes": esri_classes,
-        "DataRange": [0.0, 1.0],
         "ImageSpaceUsed": "MAP_SPACE",
         "MetaDataMode": chip_format,
         "ModelParameters": model_params,
@@ -475,6 +474,9 @@ def build_emd(
         "Padding": 0,
         "BatchSize": 1,
     }
+
+    if not is_instance_or_det and normalize_model_type(model_type_raw) != "mask_rcnn":
+        emd["DataRange"] = [0.0, 1.0]
 
     if inference_function:
         emd["InferenceFunction"] = inference_function
