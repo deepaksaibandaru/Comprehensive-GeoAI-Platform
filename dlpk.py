@@ -252,6 +252,29 @@ def _inference_function_for(kind, model_type=""):
     )
 
 
+def _convert_to_esri_maskrcnn_keys(state_dict):
+    """
+    Convert modern torchvision (>=0.12) Mask R-CNN state_dict keys to canonical
+    Esri / legacy torchvision format (mask_fcn1..4, inner_blocks, etc.) so that
+    ArcGIS Pro / fastai Learner.load() can load them with strict=True.
+    """
+    from collections import OrderedDict
+    out = OrderedDict()
+    for k, v in state_dict.items():
+        if "num_batches_tracked" in k:
+            continue
+        new_k = k
+        new_k = re.sub(r'roi_heads\.mask_head\.0\.0\.', 'roi_heads.mask_head.mask_fcn1.', new_k)
+        new_k = re.sub(r'roi_heads\.mask_head\.1\.0\.', 'roi_heads.mask_head.mask_fcn2.', new_k)
+        new_k = re.sub(r'roi_heads\.mask_head\.2\.0\.', 'roi_heads.mask_head.mask_fcn3.', new_k)
+        new_k = re.sub(r'roi_heads\.mask_head\.3\.0\.', 'roi_heads.mask_head.mask_fcn4.', new_k)
+        new_k = re.sub(r'backbone\.fpn\.inner_blocks\.(\d+)\.0\.', r'backbone.fpn.inner_blocks.\1.', new_k)
+        new_k = re.sub(r'backbone\.fpn\.layer_blocks\.(\d+)\.0\.', r'backbone.fpn.layer_blocks.\1.', new_k)
+        new_k = re.sub(r'rpn\.head\.conv\.0\.0\.', 'rpn.head.conv.', new_k)
+        out[new_k] = v
+    return out
+
+
 # =========================================================
 # CHECKPOINT METADATA
 # =========================================================
@@ -456,6 +479,12 @@ def build_emd(
     if inference_function:
         emd["InferenceFunction"] = inference_function
 
+    if is_instance_or_det or normalize_model_type(model_type_raw) == "mask_rcnn":
+        emd["ModelName"] = "MaskRCNN"
+        emd["ArcGISLearnVersion"] = "1.8.3"
+        emd["SupportsVariableTileSize"] = True
+        emd["backend"] = "pytorch"
+
     if kind == "segmentation":
         emd["IsMultidimensional"] = False
     else:
@@ -587,7 +616,19 @@ def export_dlpk(
             "contains the native checkpoint only."
         )
 
-    model_file = torchscript_name or state_dict_name
+    is_esri_maskrcnn = (
+        kind in ("instance_segmentation", "detection")
+        or normalize_model_type(meta.get("model_type", "")) == "mask_rcnn"
+        or fn_name == "ArcGISInstanceDetector.py"
+    )
+
+    # For Mask R-CNN or ArcGIS Learn inferencing functions, fastai's Learner.load()
+    # strictly requires the .pth PyTorch state dict file. Pointing ModelFile to
+    # .pt causes fastai to append .pth, triggering FileNotFoundError.
+    if is_esri_maskrcnn:
+        model_file = state_dict_name
+    else:
+        model_file = torchscript_name or state_dict_name
 
     emd = build_emd(
         meta,
@@ -628,7 +669,28 @@ def export_dlpk(
             )
             contents.append(emd_name)
 
-            package.write(checkpoint_path, state_dict_name)
+            if is_esri_maskrcnn:
+                # ArcGIS Pro's _maskrcnn_inferencing requires pure state_dict weights
+                # with canonical Esri naming instead of wrapped training checkpoints.
+                wrote_state_dict = False
+                try:
+                    import torch
+                    ckpt_data = torch.load(checkpoint_path, map_location="cpu")
+                    if isinstance(ckpt_data, dict) and ("model_state_dict" in ckpt_data or any(hasattr(v, "shape") for v in ckpt_data.values())):
+                        raw_sd = ckpt_data.get("model_state_dict", ckpt_data)
+                        if isinstance(raw_sd, dict):
+                            raw_sd = _convert_to_esri_maskrcnn_keys(raw_sd)
+                        buf = io.BytesIO()
+                        torch.save(raw_sd, buf)
+                        package.writestr(state_dict_name, buf.getvalue())
+                        wrote_state_dict = True
+                except Exception:
+                    wrote_state_dict = False
+
+                if not wrote_state_dict:
+                    package.write(checkpoint_path, state_dict_name)
+            else:
+                package.write(checkpoint_path, state_dict_name)
             contents.append(state_dict_name)
 
             if torchscript_bytes:
