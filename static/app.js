@@ -409,6 +409,7 @@ function searchPredictLocation() { const q = document.getElementById('predictSea
 function searchEvalLocation() { const q = document.getElementById('evalSearchInput').value.trim(); if (!q || !evalMap) return; const m = q.match(/^([-+]?\d*\.?\d+)\s*[,;]\s*([-+]?\d*\.?\d+)$/); if (m) { evalMap.flyTo([parseFloat(m[1]), parseFloat(m[2])], 14); return; } fetch('/api/geocode?q=' + encodeURIComponent(q)).then(r => r.json()).then(d => { if (d && d.length) evalMap.flyTo([parseFloat(d[0].lat), parseFloat(d[0].lon)], 14); }); }
 
 function finalizeTrainingUI(d = {}) {
+    if (trainingStats.isComplete && !isTraining) return;
     isTraining = false; trainingStats.isComplete = true;
     const trainBtn = document.getElementById('trainBtn'), stopBtn = document.getElementById('stopBtn');
     if (trainBtn) { trainBtn.style.display = 'flex'; trainBtn.disabled = false; trainBtn.innerHTML = '<i class="fas fa-play"></i> TRAIN'; }
@@ -461,7 +462,9 @@ function initWebSocket() {
                         if (pct !== undefined) { const pF = document.getElementById('progressFill'); if (pF) pF.style.width = pct + '%'; const pP = document.getElementById('runPercent'); if (pP) pP.textContent = Math.round(pct) + '%'; }
                     }
                 }
-                if (backendReportsTrainingComplete(d)) { finalizeTrainingUI(d); }
+                if (backendReportsTrainingComplete(d)) {
+                    if (isTraining || !trainingStats.isComplete) { finalizeTrainingUI(d); }
+                }
                 if (d.status === 'stopped') { isTraining = false; document.getElementById('trainBtn').style.display = 'flex'; document.getElementById('stopBtn').style.display = 'none'; document.getElementById('runStatus').textContent = '⏹️ Stopped'; stopTrainingTimer(); updateStatusBadge('stopped'); }
                 if (d.status === 'error' || d.status === 'failed') { isTraining = false; document.getElementById('trainBtn').style.display = 'flex'; document.getElementById('stopBtn').style.display = 'none'; document.getElementById('runStatus').textContent = '❌ Error'; stopTrainingTimer(); updateStatusBadge('error'); addLog('error', d.message || d.error || 'Training error'); }
             } catch(e) { console.error('[ws]', e); }
@@ -530,7 +533,9 @@ function backendReportsTrainingComplete(d) {
 }
 
 function applyStatusData(d) {
-    if (backendReportsTrainingComplete(d)) { finalizeTrainingUI(d); }
+    if (backendReportsTrainingComplete(d)) {
+        if (isTraining || !trainingStats.isComplete) { finalizeTrainingUI(d); }
+    }
     else if (d && (d.status === 'Failed' || d.status === 'failed')) { isTraining = false; const tb = document.getElementById('trainBtn'); if (tb) { tb.style.display = 'flex'; tb.disabled = false; } const sb = document.getElementById('stopBtn'); if (sb) sb.style.display = 'none'; const rs = document.getElementById('runStatus'); if (rs) rs.textContent = '❌ Training failed'; updateStatusBadge('error'); stopTrainingTimer(); }
     else if (d && (d.status === 'Stopped' || d.status === 'stopped')) { isTraining = false; const tb = document.getElementById('trainBtn'); if (tb) { tb.style.display = 'flex'; tb.disabled = false; } const sb = document.getElementById('stopBtn'); if (sb) sb.style.display = 'none'; const rs = document.getElementById('runStatus'); if (rs) rs.textContent = '⏹️ Stopped'; updateStatusBadge('stopped'); stopTrainingTimer(); }
     if (d && (isTraining || d.is_training || d.training_completed || d.status === 'Completed' || d.status === 'training' || d.status === 'training_update' || d.status === 'training_progress')) {
@@ -1572,6 +1577,14 @@ function loadModels() {
 
         const list = document.getElementById('yourModelsList');
         if (list) {
+            if (document.activeElement && list.contains(document.activeElement)) {
+                return;
+            }
+            const modelsSignature = availableModels.map(m => `${m.key}_${m.filepath}_${m.best_iou}_${normalizeModelPath(m.filepath) === normalizeModelPath(loadedModelPath)}`).join('|');
+            if (list.dataset.signature === modelsSignature && list.children.length > 0) {
+                return;
+            }
+            list.dataset.signature = modelsSignature;
             list.innerHTML = '';
             if (availableModels.length === 0) {
                 list.innerHTML = '<div style="grid-column:1/-1;text-align:center;padding:40px;color:#64748b;">No trained models yet</div>';
