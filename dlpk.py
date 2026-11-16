@@ -116,7 +116,7 @@ class BraeinAIImageClassifier:
         self.name = 'Pixel Classification'
         self.description = 'Pixel classification python raster function for Braein.ai model.'
 
-    def initialize(self, model, model_as_file):
+    def initialize(self, model=None, model_as_file=True, **kwargs):
         import torch
         if hasattr(model, 'eval'):
             model.eval()
@@ -148,7 +148,7 @@ class BraeinAIObjectDetector:
         self.name = 'Object Detection'
         self.description = 'Object detection python raster function for Braein.ai model.'
 
-    def initialize(self, model, model_as_file):
+    def initialize(self, model=None, model_as_file=True, **kwargs):
         import torch
         if hasattr(model, 'eval'):
             model.eval()
@@ -349,7 +349,44 @@ def read_checkpoint_meta(checkpoint_path):
 
             meta[key] = value
 
-    meta["has_state_dict"] = "model_state_dict" in ckpt
+    meta["has_state_dict"] = "model_state_dict" in ckpt or any(hasattr(v, "shape") for v in ckpt.values())
+
+    # Fallback for bare state_dict or when metadata is missing: inspect layers and adjacent .emd
+    sd = ckpt.get("model_state_dict", ckpt) if isinstance(ckpt, dict) else {}
+    if isinstance(sd, dict):
+        if "model_type" not in meta:
+            if any(("mask_head" in k) or ("mask_predictor" in k) for k in sd):
+                meta["model_type"] = "mask_rcnn"
+                meta["architecture"] = "MaskRCNN"
+                meta["backbone"] = "resnet50"
+            elif any(("roi_heads" in k) or ("rpn" in k) for k in sd):
+                meta["model_type"] = "rcnn"
+                meta["architecture"] = "RCNN"
+                meta["backbone"] = "resnet50"
+
+        cls_w = sd.get("roi_heads.box_predictor.cls_score.weight")
+        if cls_w is not None and hasattr(cls_w, "shape") and len(cls_w.shape) >= 2:
+            meta["num_classes"] = int(cls_w.shape[0])
+
+    parent = os.path.dirname(os.path.abspath(checkpoint_path))
+    for cdir in (parent, os.path.dirname(parent)):
+        if not cdir or not os.path.isdir(cdir):
+            continue
+        for fn in os.listdir(cdir):
+            if fn.lower().endswith(".emd"):
+                try:
+                    with open(os.path.join(cdir, fn), "r", encoding="utf-8-sig") as h:
+                        edata = json.load(h)
+                    if isinstance(edata, dict):
+                        if "model_type" not in meta:
+                            meta["model_type"] = _model_type_from_emd(edata)
+                        if "class_names" not in meta and edata.get("Classes"):
+                            c_names = [c.get("Name") for c in edata["Classes"] if isinstance(c, dict) and c.get("Name")]
+                            if c_names:
+                                meta["class_names"] = ["background"] + c_names
+                        break
+                except Exception:
+                    pass
 
     return meta
 
