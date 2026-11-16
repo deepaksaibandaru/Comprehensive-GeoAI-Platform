@@ -275,6 +275,87 @@ def _convert_to_esri_maskrcnn_keys(state_dict):
     return out
 
 
+def _align_maskrcnn_head_to_emd_classes(state_dict, emd_classes, orig_class_names=None):
+    """
+    Ensure the state_dict classification/mask heads strictly match the number
+    of foreground classes listed in emd_classes (+ 1 for background).
+    If the state_dict has more classes (e.g. from an older multi-class base
+    checkpoint), slice the head weights so that ArcGIS Pro never encounters
+    a shape mismatch and only sees the active project classes.
+    """
+    import torch
+    from collections import OrderedDict
+
+    target_fg_names = [c["Name"] for c in emd_classes if isinstance(c, dict) and c.get("Name")]
+    target_num_classes = len(target_fg_names) + 1  # include background (class 0)
+
+    cls_w = state_dict.get("roi_heads.box_predictor.cls_score.weight")
+    if cls_w is None or not hasattr(cls_w, "shape"):
+        return state_dict
+
+    current_num_classes = int(cls_w.shape[0])
+    if current_num_classes == target_num_classes:
+        return state_dict
+
+    # Map target classes to existing indices:
+    indices = [0]  # 0 is always background
+    if orig_class_names and len(orig_class_names) == current_num_classes:
+        lower_orig = [str(n).lower() for n in orig_class_names]
+        for tname in target_fg_names:
+            try:
+                idx = lower_orig.index(str(tname).lower())
+                indices.append(idx)
+            except ValueError:
+                available = [i for i in range(1, current_num_classes) if i not in indices]
+                if available:
+                    indices.append(available[0])
+    else:
+        # Match target count by picking the target class indices
+        if target_num_classes < current_num_classes:
+            # If target has 1 foreground class, prefer the last class trained or index 1
+            if len(target_fg_names) == 1:
+                indices = [0, current_num_classes - 1]
+            else:
+                indices = list(range(target_num_classes))
+        else:
+            indices = list(range(min(target_num_classes, current_num_classes)))
+
+    while len(indices) < target_num_classes and len(indices) < current_num_classes:
+        available = [i for i in range(current_num_classes) if i not in indices]
+        if available:
+            indices.append(available[0])
+        else:
+            break
+
+    if len(indices) != target_num_classes:
+        return state_dict
+
+    idx_tensor = torch.tensor(indices, dtype=torch.long)
+    out = OrderedDict()
+    for k, v in state_dict.items():
+        if k == "roi_heads.box_predictor.cls_score.weight":
+            out[k] = v[idx_tensor]
+        elif k == "roi_heads.box_predictor.cls_score.bias":
+            out[k] = v[idx_tensor]
+        elif k == "roi_heads.box_predictor.bbox_pred.weight":
+            bbox_indices = []
+            for c in indices:
+                bbox_indices.extend(range(c * 4, (c + 1) * 4))
+            out[k] = v[torch.tensor(bbox_indices, dtype=torch.long)]
+        elif k == "roi_heads.box_predictor.bbox_pred.bias":
+            bbox_indices = []
+            for c in indices:
+                bbox_indices.extend(range(c * 4, (c + 1) * 4))
+            out[k] = v[torch.tensor(bbox_indices, dtype=torch.long)]
+        elif k == "roi_heads.mask_predictor.mask_fcn_logits.weight":
+            out[k] = v[idx_tensor]
+        elif k == "roi_heads.mask_predictor.mask_fcn_logits.bias":
+            out[k] = v[idx_tensor]
+        else:
+            out[k] = v
+    return out
+
+
 # =========================================================
 # CHECKPOINT METADATA
 # =========================================================
@@ -451,11 +532,13 @@ def build_emd(
                 "Color": [255, 255, 255],
             },
         ]
-        if len(names) > 1:
+        fg_names = [n for n in names if n.lower() not in ("background", "default", "unknown", "nodata")]
+        for idx, n in enumerate(fg_names):
+            color = _PALETTE[idx % len(_PALETTE)]
             esri_classes.append({
-                "Value": 2,
-                "Name": names[1],
-                "Color": [228, 26, 28],
+                "Value": idx + 2,
+                "Name": n,
+                "Color": color,
             })
 
     mode = str(meta.get("mode", "binary")).lower()
@@ -511,9 +594,6 @@ def build_emd(
         "Padding": 0,
         "BatchSize": 1,
     }
-
-    if not is_instance_or_det and normalize_model_type(model_type_raw) != "mask_rcnn":
-        emd["DataRange"] = [0.0, 1.0]
 
     if inference_function:
         emd["InferenceFunction"] = inference_function
@@ -719,6 +799,8 @@ def export_dlpk(
                         raw_sd = ckpt_data.get("model_state_dict", ckpt_data)
                         if isinstance(raw_sd, dict):
                             raw_sd = _convert_to_esri_maskrcnn_keys(raw_sd)
+                            ckpt_classes = ckpt_data.get("class_names") if isinstance(ckpt_data, dict) else meta.get("class_names")
+                            raw_sd = _align_maskrcnn_head_to_emd_classes(raw_sd, emd.get("Classes", []), ckpt_classes)
                         buf = io.BytesIO()
                         torch.save(raw_sd, buf)
                         package.writestr(state_dict_name, buf.getvalue())

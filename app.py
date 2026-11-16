@@ -654,9 +654,9 @@ def load_checkpoint(model_path, device, requested_num_classes=None):
         else:
             ckpt_num_classes = int(meta.get("num_classes") or (len(meta.get("class_names") or [])) or 2)
         
-        # NEW: If the user added new labels, we must expand the head.
-        if requested_num_classes is not None and requested_num_classes > ckpt_num_classes:
-            print(f"🔧 Expanding model head from {ckpt_num_classes} to {requested_num_classes} classes for fine-tuning.")
+        # Adapt the model head if the requested class count differs from the checkpoint
+        if requested_num_classes is not None and requested_num_classes != ckpt_num_classes:
+            print(f"🔧 Adapting model head from {ckpt_num_classes} to {requested_num_classes} classes for fine-tuning.")
             ckpt_num_classes = requested_num_classes
             meta["num_classes"] = requested_num_classes
 
@@ -1681,14 +1681,10 @@ async def train_model(request: Request):
             if source_tile != int(tile_size): 
                 raise ValueError(f"The .dlpk expects {source_tile}x{source_tile} tiles, but your dataset is {tile_size}x{tile_size}. Rebuild the dataset with tile size {source_tile}.")
             
-            # 3. Detect if the user added new classes
             dataset_classes = len(class_names)
             dlpk_classes = int(fine_tune_source_meta.get("num_classes", 2))
             
-            if dataset_classes < dlpk_classes:
-                raise ValueError(f"The .dlpk expects {dlpk_classes} classes, but your dataset only has {dataset_classes}. Ensure your labels match.")
-            
-            # 4. Load the actual model with the expanded class count
+            # Load the model with its head adapted to the active dataset's class count
             fine_tune_source_model, fine_tune_source_meta = load_checkpoint(
                 fine_tune_model_path, 
                 device=torch.device("cpu"), 
