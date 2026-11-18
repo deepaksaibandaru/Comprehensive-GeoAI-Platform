@@ -2160,7 +2160,7 @@ function runPrediction() {
     const nmsThr = parseFloat(document.getElementById('predictNmsThreshold')?.value || '0.20');
     const maxSz = parseFloat(document.getElementById('predictMaxSize')?.value || '65');
     const minSz = parseFloat(document.getElementById('predictMinSize')?.value || '2');
-    const regularize = document.getElementById('predictRegularize') ? document.getElementById('predictRegularize').checked : true;
+    const regularize = document.getElementById('predictRegularize') ? document.getElementById('predictRegularize').checked : false;
     const ps = document.getElementById('predictStatus'); if (ps) { ps.textContent = '⏳ Predicting...'; ps.style.color = '#fbbf24'; }
     const curZoom = mapPredict.getZoom(), aoiBoundsPayload = (aoiBounds && aoiBounds.isValid()) ? { north: aoiBounds.getNorth(), south: aoiBounds.getSouth(), east: aoiBounds.getEast(), west: aoiBounds.getWest() } : null;
 
