@@ -3567,9 +3567,19 @@ async def predict_compat(data: Dict):
                                     poly_shp = None
 
                             if poly_shp is None:
+                                # For instance segmentation models (Mask R-CNN), every valid detection MUST have a real mask.
+                                # Never synthesize an axis-aligned bounding box when the mask branch failed to segment an object!
+                                if c_masks is not None:
+                                    continue
                                 p = ShapelyPolygon([[gx1, gy1], [gx2, gy1], [gx2, gy2], [gx1, gy2], [gx1, gy1]])
                                 if p.is_valid and not p.is_empty: poly_shp = p
                                 else: continue
+
+                            # Suppress saturated axis-aligned bounding box mask artifacts
+                            if c_masks is not None and poly_shp is not None:
+                                box_area = max(1.0, (gx2 - gx1) * (gy2 - gy1))
+                                if box_area > 300 and (poly_shp.area / box_area) > 0.88 and len(poly_shp.exterior.coords) <= 6:
+                                    continue
 
                             c_name = _prediction_class_name(lbl, model_class_names)
                             if str(c_name).strip() in ("1", "0", "", "Class_1", "Object", "object", "nodata", "no_data", "background", "__background__"):
@@ -3609,23 +3619,30 @@ async def predict_compat(data: Dict):
                             suppressed.add(j)
                             continue
 
-                        # Complementary Union: Heal structures split across tile seams into a single unified whole
-                        u = cur["poly"].union(oth["poly"])
-                        if u.geom_type == "MultiPolygon":
-                            u = unary_union([cur["poly"].buffer(1.5), oth["poly"].buffer(1.5)]).buffer(-1.5)
+                        # Complementary Union: Heal structures split across tile seams into a single unified whole.
+                        # ONLY heal across seams when BOTH objects touch an internal seam border!
+                        # Never merge two separate buildings that just happen to touch inside a tile!
+                        if cur["touches_internal"] and oth["touches_internal"]:
+                            u = cur["poly"].union(oth["poly"])
+                            if u.geom_type == "MultiPolygon":
+                                u = unary_union([cur["poly"].buffer(1.5), oth["poly"].buffer(1.5)]).buffer(-1.5)
 
-                        if u.is_valid and not u.is_empty:
-                            if u.geom_type == "Polygon" and u.area >= max(cur["poly"].area, oth["poly"].area) and u.area <= (cur["poly"].area + oth["poly"].area):
-                                cur["poly"] = u
-                                cur["score"] = max(cur["score"], oth["score"])
-                                cur["b_px"] = [
-                                    min(cur["b_px"][0], oth["b_px"][0]),
-                                    min(cur["b_px"][1], oth["b_px"][1]),
-                                    max(cur["b_px"][2], oth["b_px"][2]),
-                                    max(cur["b_px"][3], oth["b_px"][3])
-                                ]
-                                cur["touches_internal"] = cur["touches_internal"] and oth["touches_internal"]
-                                suppressed.add(j)
+                            if u.is_valid and not u.is_empty and u.geom_type == "Polygon":
+                                # Ensure healed building does not exceed realistic max size
+                                ub = u.bounds
+                                uw_m, uh_m = (ub[2] - ub[0]) * m_per_px, (ub[3] - ub[1]) * m_per_px
+                                if max_size_m <= 0 or (uw_m <= max_size_m and uh_m <= max_size_m and (uw_m * uh_m) <= (max_size_m * max_size_m)):
+                                    if u.area >= max(cur["poly"].area, oth["poly"].area) and u.area <= (cur["poly"].area + oth["poly"].area):
+                                        cur["poly"] = u
+                                        cur["score"] = max(cur["score"], oth["score"])
+                                        cur["b_px"] = [
+                                            min(cur["b_px"][0], oth["b_px"][0]),
+                                            min(cur["b_px"][1], oth["b_px"][1]),
+                                            max(cur["b_px"][2], oth["b_px"][2]),
+                                            max(cur["b_px"][3], oth["b_px"][3])
+                                        ]
+                                        cur["touches_internal"] = cur["touches_internal"] and oth["touches_internal"]
+                                        suppressed.add(j)
                     except Exception:
                         pass
 
@@ -3643,19 +3660,34 @@ async def predict_compat(data: Dict):
             for cur in healed_items:
                 is_dup = False
                 cb = cur["b_px"]
-                cur_area = (cb[2] - cb[0]) * (cb[3] - cb[1])
+                cur_area = max(1.0, (cb[2] - cb[0]) * (cb[3] - cb[1]))
                 for prev in final_kept:
                     pb = prev["b_px"]
-                    prev_area = (pb[2] - pb[0]) * (pb[3] - pb[1])
+                    prev_area = max(1.0, (pb[2] - pb[0]) * (pb[3] - pb[1]))
                     ix1, iy1 = max(cb[0], pb[0]), max(cb[1], pb[1])
                     ix2, iy2 = min(cb[2], pb[2]), min(cb[3], pb[3])
                     iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
                     inter_box = iw * ih
                     union_box = cur_area + prev_area - inter_box
-                    iou = inter_box / max(1.0, union_box)
+                    box_iou = inter_box / max(1.0, union_box)
                     min_box = min(cur_area, prev_area)
-                    containment = inter_box / max(1.0, min_box)
-                    if iou > nms_threshold or containment > 0.85:
+                    box_containment = inter_box / max(1.0, min_box)
+
+                    # True mask intersection over union for accurate polygonal separation
+                    poly_iou = 0.0
+                    poly_containment = 0.0
+                    if cur["poly"].intersects(prev["poly"]):
+                        try:
+                            p_inter = cur["poly"].intersection(prev["poly"]).area
+                            p_union = cur["poly"].area + prev["poly"].area - p_inter
+                            poly_iou = p_inter / max(1.0, p_union)
+                            poly_containment = p_inter / max(1.0, min(cur["poly"].area, prev["poly"].area))
+                        except Exception:
+                            poly_iou = 0.0
+                            poly_containment = 0.0
+
+                    # Suppress if polygons overlap significantly, or boxes have extreme overlap/containment
+                    if poly_iou > max(0.25, nms_threshold) or poly_containment > 0.65 or box_iou > 0.60 or box_containment > 0.88:
                         is_dup = True
                         break
                 if not is_dup:
