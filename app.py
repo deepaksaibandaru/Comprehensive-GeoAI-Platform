@@ -3500,46 +3500,14 @@ async def predict_compat(data: Dict):
                             bw, bh = float(b[2] - b[0]), float(b[3] - b[1])
                             if min(bw, bh) < 4: continue
 
-                            # Check if touching internal tile seam
-                            touch_left = is_left_internal and (b[0] <= 3)
-                            touch_right = is_right_internal and (b[2] >= detector_tile_size - 3)
-                            touch_top = is_top_internal and (b[1] <= 3)
-                            touch_bottom = is_bottom_internal and (b[3] >= detector_tile_size - 3)
-                            touches_internal = touch_left or touch_right or touch_top or touch_bottom
-
-                            # Proposal centroid in chip local coordinates
-                            cx_loc = (b[0] + b[2]) / 2.0
-                            cy_loc = (b[1] + b[3]) / 2.0
-
-                            # Centroid Margin Filter (ESRI ArcGISInstanceDetector):
-                            # If an object is cut at the internal border and its centroid lies in the outer overlap margin,
-                            # drop it because the adjacent overlapping chip (which sees this structure centered) owns it.
-                            if (touch_left and cx_loc < padding) or \
-                               (touch_right and cx_loc > detector_tile_size - padding) or \
-                               (touch_top and cy_loc < padding) or \
-                               (touch_bottom and cy_loc > detector_tile_size - padding):
-                                continue
-
                             # Real-world metric dimensions
                             w_m = bw * m_per_px
                             h_m = bh * m_per_px
 
-                            # Min size filter
+                            # Size filters from user UI settings
                             if min_size_m > 0 and (w_m < min_size_m or h_m < min_size_m):
                                 continue
-
-                            # Max size filter (GeoAI Model Hub rule: max building size <= max_size_m and area <= max_size_m^2)
-                            if max_size_m > 0:
-                                if w_m > max_size_m or h_m > max_size_m or (w_m * h_m) > (max_size_m * max_size_m):
-                                    continue
-
-                            # Aspect ratio filter (eliminates edge slice streaks)
-                            aspect_ratio = max(w_m, h_m) / max(0.1, min(w_m, h_m))
-                            if aspect_ratio > 4.5:
-                                continue
-
-                            # Suppress high-aspect ratio edge slivers on internal seams (GeoAI Model Hub rule)
-                            if touches_internal and aspect_ratio > 1.50:
+                            if max_size_m > 0 and (w_m > max_size_m or h_m > max_size_m):
                                 continue
 
                             lbl = int(c_labels[i]) if (c_labels is not None and i < len(c_labels)) else 1
@@ -3556,30 +3524,21 @@ async def predict_compat(data: Dict):
                                     contours, _ = cv2.findContours(crop_m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                                     if contours:
                                         c = max(contours, key=cv2.contourArea)
-                                        c_approx = cv2.approxPolyDP(c, epsilon=1.2, closed=True)
-                                        pts = [(int(pt[0][0]) + ox, int(pt[0][1]) + oy) for pt in c_approx]
-                                        if len(pts) >= 3:
-                                            pts.append(pts[0])
-                                            p = ShapelyPolygon(pts)
-                                            if not p.is_valid: p = p.buffer(0)
-                                            if not p.is_empty: poly_shp = p
+                                        if cv2.contourArea(c) >= 4:
+                                            c_approx = cv2.approxPolyDP(c, epsilon=1.0, closed=True)
+                                            pts = [(int(pt[0][0]) + ox, int(pt[0][1]) + oy) for pt in c_approx]
+                                            if len(pts) >= 3:
+                                                pts.append(pts[0])
+                                                p = ShapelyPolygon(pts)
+                                                if not p.is_valid: p = p.buffer(0)
+                                                if not p.is_empty and p.area >= 4: poly_shp = p
                                 except Exception:
                                     poly_shp = None
 
+                            # For instance segmentation models (Mask R-CNN), require valid mask polygon.
+                            # Never fall back to synthetic rectangular bounding boxes!
                             if poly_shp is None:
-                                # For instance segmentation models (Mask R-CNN), every valid detection MUST have a real mask.
-                                # Never synthesize an axis-aligned bounding box when the mask branch failed to segment an object!
-                                if c_masks is not None:
-                                    continue
-                                p = ShapelyPolygon([[gx1, gy1], [gx2, gy1], [gx2, gy2], [gx1, gy2], [gx1, gy1]])
-                                if p.is_valid and not p.is_empty: poly_shp = p
-                                else: continue
-
-                            # Suppress saturated axis-aligned bounding box mask artifacts
-                            if c_masks is not None and poly_shp is not None:
-                                box_area = max(1.0, (gx2 - gx1) * (gy2 - gy1))
-                                if box_area > 300 and (poly_shp.area / box_area) > 0.88 and len(poly_shp.exterior.coords) <= 6:
-                                    continue
+                                continue
 
                             c_name = _prediction_class_name(lbl, model_class_names)
                             if str(c_name).strip() in ("1", "0", "", "Class_1", "Object", "object", "nodata", "no_data", "background", "__background__"):
@@ -3591,76 +3550,20 @@ async def predict_compat(data: Dict):
                                 "lbl": lbl,
                                 "c_name": c_name,
                                 "poly": poly_shp,
-                                "touches_internal": touches_internal,
                                 "w_m": w_m, "h_m": h_m
                             })
 
-            # Pre-NMS Seam Healing & Complete Feature Prioritization
-            suppressed = set()
-            for i in range(len(raw_items)):
-                if i in suppressed: continue
-                cur = raw_items[i]
-                for j in range(i + 1, len(raw_items)):
-                    if j in suppressed: continue
-                    oth = raw_items[j]
-                    if not cur["poly"].intersects(oth["poly"]): continue
-                    try:
-                        inter = cur["poly"].intersection(oth["poly"])
-                        min_a = min(cur["poly"].area, oth["poly"].area)
-                        if min_a <= 0: continue
-                        overlap_ratio = inter.area / min_a
-
-                        # If one detection touches an internal seam and the other is complete (uncut),
-                        # the complete uncut detection supersedes the seam-cut fragment!
-                        if cur["touches_internal"] and not oth["touches_internal"] and overlap_ratio > 0.35:
-                            suppressed.add(i)
-                            break
-                        elif oth["touches_internal"] and not cur["touches_internal"] and overlap_ratio > 0.35:
-                            suppressed.add(j)
-                            continue
-
-                        # Complementary Union: Heal structures split across tile seams into a single unified whole.
-                        # ONLY heal across seams when BOTH objects touch an internal seam border!
-                        # Never merge two separate buildings that just happen to touch inside a tile!
-                        if cur["touches_internal"] and oth["touches_internal"]:
-                            u = cur["poly"].union(oth["poly"])
-                            if u.geom_type == "MultiPolygon":
-                                u = unary_union([cur["poly"].buffer(1.5), oth["poly"].buffer(1.5)]).buffer(-1.5)
-
-                            if u.is_valid and not u.is_empty and u.geom_type == "Polygon":
-                                # Ensure healed building does not exceed realistic max size
-                                ub = u.bounds
-                                uw_m, uh_m = (ub[2] - ub[0]) * m_per_px, (ub[3] - ub[1]) * m_per_px
-                                if max_size_m <= 0 or (uw_m <= max_size_m and uh_m <= max_size_m and (uw_m * uh_m) <= (max_size_m * max_size_m)):
-                                    if u.area >= max(cur["poly"].area, oth["poly"].area) and u.area <= (cur["poly"].area + oth["poly"].area):
-                                        cur["poly"] = u
-                                        cur["score"] = max(cur["score"], oth["score"])
-                                        cur["b_px"] = [
-                                            min(cur["b_px"][0], oth["b_px"][0]),
-                                            min(cur["b_px"][1], oth["b_px"][1]),
-                                            max(cur["b_px"][2], oth["b_px"][2]),
-                                            max(cur["b_px"][3], oth["b_px"][3])
-                                        ]
-                                        cur["touches_internal"] = cur["touches_internal"] and oth["touches_internal"]
-                                        suppressed.add(j)
-                    except Exception:
-                        pass
-
-            healed_items = []
-            for i in range(len(raw_items)):
-                if i in suppressed: continue
-                it = raw_items[i]
-                if it["touches_internal"] and (it["poly"].area < 450 or min(it["w_m"], it["h_m"]) < 3.5):
-                    continue
-                healed_items.append(it)
-
-            # Post-Healing NMS & Containment Deduplication
-            healed_items.sort(key=lambda x: x["score"], reverse=True)
+            # Pure Standard NMS (Non-Maximum Suppression) on Raw Model Predictions
+            # Sort detections by confidence score descending
+            raw_items.sort(key=lambda x: x["score"], reverse=True)
             final_kept = []
-            for cur in healed_items:
+            eff_nms = max(0.15, min(0.90, nms_threshold))
+
+            for cur in raw_items:
                 is_dup = False
                 cb = cur["b_px"]
                 cur_area = max(1.0, (cb[2] - cb[0]) * (cb[3] - cb[1]))
+
                 for prev in final_kept:
                     pb = prev["b_px"]
                     prev_area = max(1.0, (pb[2] - pb[0]) * (pb[3] - pb[1]))
@@ -3668,12 +3571,12 @@ async def predict_compat(data: Dict):
                     ix2, iy2 = min(cb[2], pb[2]), min(cb[3], pb[3])
                     iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
                     inter_box = iw * ih
+                    if inter_box <= 0:
+                        continue
+
                     union_box = cur_area + prev_area - inter_box
                     box_iou = inter_box / max(1.0, union_box)
-                    min_box = min(cur_area, prev_area)
-                    box_containment = inter_box / max(1.0, min_box)
 
-                    # True mask intersection over union for accurate polygonal separation
                     poly_iou = 0.0
                     poly_containment = 0.0
                     if cur["poly"].intersects(prev["poly"]):
@@ -3686,31 +3589,13 @@ async def predict_compat(data: Dict):
                             poly_iou = 0.0
                             poly_containment = 0.0
 
-                    # Suppress if polygons overlap significantly, or boxes have extreme overlap/containment
-                    if poly_iou > max(0.25, nms_threshold) or poly_containment > 0.65 or box_iou > 0.60 or box_containment > 0.88:
+                    # Deduplicate overlapping detections from adjacent chips
+                    if poly_iou > eff_nms or poly_containment > 0.65 or box_iou > 0.60:
                         is_dup = True
                         break
+
                 if not is_dup:
                     final_kept.append(cur)
-
-            # Smooth any remaining seam cuts into natural curved borders
-            internal_seam_coords = {
-                "X": [ox for ox in xs if 0 < ox < W],
-                "Y": [oy for oy in ys if 0 < oy < H]
-            }
-
-            for item in final_kept:
-                poly_shp = item["poly"]
-                if item["touches_internal"]:
-                    try:
-                        poly_shp = smooth_seam_cut(poly_shp, internal_seam_coords)
-                    except Exception:
-                        pass
-                try:
-                    poly_shp = poly_shp.simplify(1.0, preserve_topology=True)
-                except Exception:
-                    pass
-                item["poly"] = poly_shp
 
             west, east = float(bounds["west"]), float(bounds["east"])
             south, north = float(bounds["south"]), float(bounds["north"])
