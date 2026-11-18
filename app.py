@@ -484,8 +484,12 @@ def _normalise_state_dict_keys(state_dict):
         new_k = re.sub(r'roi_heads\.mask_head\.mask_fcn2\.', 'roi_heads.mask_head.1.0.', new_k)
         new_k = re.sub(r'roi_heads\.mask_head\.mask_fcn3\.', 'roi_heads.mask_head.2.0.', new_k)
         new_k = re.sub(r'roi_heads\.mask_head\.mask_fcn4\.', 'roi_heads.mask_head.3.0.', new_k)
-        new_k = re.sub(r'backbone\.fpn\.inner_blocks\.(\d+)\.', r'backbone.fpn.inner_blocks.\1.0.', new_k)
-        new_k = re.sub(r'backbone\.fpn\.layer_blocks\.(\d+)\.', r'backbone.fpn.layer_blocks.\1.0.', new_k)
+        # Convert legacy Esri inner/layer blocks (inner_blocks.<N>.) to modern torchvision (inner_blocks.<N>.0.)
+        # Use negative lookahead so we don't accidentally mutate keys that are already .0.0.
+        new_k = re.sub(r'backbone\.fpn\.inner_blocks\.(\d+)\.(?!(\d+)\.)', r'backbone.fpn.inner_blocks.\1.0.', new_k)
+        new_k = re.sub(r'backbone\.fpn\.layer_blocks\.(\d+)\.(?!(\d+)\.)', r'backbone.fpn.layer_blocks.\1.0.', new_k)
+        new_k = re.sub(r'backbone\.fpn\.inner_blocks\.(\d+)\.0\.0\.', r'backbone.fpn.inner_blocks.\1.0.', new_k)
+        new_k = re.sub(r'backbone\.fpn\.layer_blocks\.(\d+)\.0\.0\.', r'backbone.fpn.layer_blocks.\1.0.', new_k)
         new_k = re.sub(r'rpn\.head\.conv\.(weight|bias)', r'rpn.head.conv.0.0.\1', new_k)
         converted[new_k] = v
     return converted
