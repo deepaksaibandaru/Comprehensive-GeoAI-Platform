@@ -381,8 +381,9 @@ EXPORT_ROOTS = [
 # the caller.
 #
 #   EXTRA_READ_ROOTS=D:/GeoAI/orthophotos
+_default_extra = ["D:/Downloads", "D:\\Downloads"] if os.path.exists("D:/Downloads") else []
 EXTRA_READ_ROOTS = [
-    os.path.realpath(p) for p in _env_list("EXTRA_READ_ROOTS", [])
+    os.path.realpath(p) for p in _env_list("EXTRA_READ_ROOTS", _default_extra)
 ]
 
 # Roots the application reads from and writes to in normal operation.

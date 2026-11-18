@@ -1,4 +1,10 @@
 import os, sys, json, math, time, random, uuid, shutil, zipfile, traceback, asyncio
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 import base64
 import re
 from urllib.parse import quote, unquote
@@ -29,6 +35,10 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
+
+_mpl_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "torch_home", "mpl_cache")
+os.makedirs(_mpl_dir, exist_ok=True)
+os.environ.setdefault("MPLCONFIGDIR", _mpl_dir)
 
 import matplotlib
 matplotlib.use("Agg")
@@ -484,6 +494,8 @@ def _read_adjacent_emd_metadata(model_path):
     """Read an Esri EMD beside an extracted DLPK checkpoint, without guessing across packages."""
     parent = os.path.dirname(os.path.abspath(model_path))
     stem = os.path.splitext(os.path.basename(model_path))[0].lower()
+    norm_parent = parent.lower().replace("\\", "/")
+    is_extracted_dir = "/dlpk_imported/" in norm_parent and not norm_parent.endswith("/dlpk_imported") and not norm_parent.endswith("/_incoming")
     directories = [parent, os.path.dirname(parent)]
     for directory_index, directory in enumerate(directories):
         if not directory or not os.path.isdir(directory):
@@ -493,8 +505,8 @@ def _read_adjacent_emd_metadata(model_path):
         except OSError:
             continue
         exact = [p for p in emd_files if os.path.splitext(os.path.basename(p))[0].lower() == stem]
-        # In the extracted package directory, one unambiguous EMD is also safe.
-        candidates = exact or (emd_files if directory_index == 0 and len(emd_files) == 1 else [])
+        # In a dedicated extracted package directory, one unambiguous EMD is safe. In shared directories (like models/saved), ONLY accept exact matches.
+        candidates = exact or (emd_files if (directory_index == 0 and is_extracted_dir and len(emd_files) == 1) else [])
         for path in candidates:
             try:
                 with open(path, "r", encoding="utf-8-sig") as handle:
@@ -506,10 +518,32 @@ def _read_adjacent_emd_metadata(model_path):
     return {}
 
 
+def infer_foreground_class(name_or_path, fallback="object"):
+    s = str(name_or_path or "").lower()
+    if any(k in s for k in ("building", "footprint", "house", "roof", "extract_building", "bd11", "bd_")):
+        return "building"
+    if any(k in s for k in ("car", "vehicle", "automobile", "cardetection")):
+        return "car"
+    if any(k in s for k in ("palm", "tree", "vegetation")):
+        return "tree"
+    if any(k in s for k in ("road", "highway", "street")):
+        return "road"
+    if any(k in s for k in ("storage", "tank")):
+        return "storage_tank"
+    if any(k in s for k in ("ship", "boat", "vessel")):
+        return "vessel"
+    if any(k in s for k in ("solar", "panel")):
+        return "solar_panel"
+    if any(k in s for k in ("pool", "swimming")):
+        return "swimming_pool"
+    return fallback
+
+
 def _class_names_from_emd(emd):
     raw = emd.get("ClassNames") or emd.get("class_names") or emd.get("Classes") or emd.get("classes")
     if isinstance(raw, dict):
         raw = list(raw.values())
+    names = None
     if isinstance(raw, (list, tuple)):
         if raw and isinstance(raw[0], dict):
             rows = []
@@ -522,15 +556,22 @@ def _class_names_from_emd(emd):
             if rows:
                 rows.sort(key=lambda x: x[0])
                 names = [name for _, name in rows]
-                if names and names[0].strip().lower() in ("background", "__background__"):
-                    return names
-                return ["background"] + names
+                if not (names and names[0].strip().lower() in ("background", "__background__")):
+                    names = ["background"] + names
         else:
             names = [str(v).strip() for v in raw if str(v).strip()]
             if names:
                 if names[0].lower() not in ("background", "__background__"):
                     names.insert(0, "background")
-                return names
+
+    if names:
+        inferred = infer_foreground_class(
+            emd.get("ModelFile") or emd.get("ModelName") or emd.get("Name") or (emd.get("BraeinAI") or {}).get("ModelName") or "",
+            fallback=""
+        )
+        if inferred:
+            names = [inferred if str(c).strip().lower() in ("1", "0", "class_1", "object", "nodata", "no_data") else c for c in names]
+        return names
     return None
 
 
@@ -552,21 +593,23 @@ def _read_dlpk_metadata(dlpk_path):
 
 
 def load_checkpoint(model_path, device, requested_num_classes=None):
-    model_path = depcfg.resolve_within_roots(model_path, depcfg.MODEL_ROOTS + depcfg.EXPORT_ROOTS)
+    model_path = depcfg.resolve_within_roots(model_path, depcfg.MODEL_ROOTS + depcfg.EXPORT_ROOTS + depcfg.EXTRA_READ_ROOTS)
     if not model_path or not os.path.exists(model_path): 
         raise FileNotFoundError(f"Checkpoint not found: {model_path}")
     
     if str(model_path).lower().endswith(".dlpk"):
         import dlpk
         extract_dir = os.path.join(depcfg.DLPK_IMPORT_DIR, dlpk._safe_stem(os.path.basename(model_path)))
+        dlpk_mtime = os.path.getmtime(model_path) if os.path.exists(model_path) else 0
+        needs_import = True
         if os.path.isdir(extract_dir):
             pths = [os.path.join(extract_dir, f) for f in os.listdir(extract_dir) if f.lower().endswith(".pth")]
-            if pths:
-                model_path = pths[0]
-            else:
-                res = dlpk.import_dlpk(model_path, depcfg.DLPK_IMPORT_DIR)
-                model_path = res["model_path"]
-        else:
+            emds = [os.path.join(extract_dir, f) for f in os.listdir(extract_dir) if f.lower().endswith(".emd")]
+            if pths and emds:
+                if all(os.path.getmtime(p) >= dlpk_mtime for p in pths) and all(os.path.getmtime(e) >= dlpk_mtime for e in emds):
+                    model_path = pths[0]
+                    needs_import = False
+        if needs_import:
             res = dlpk.import_dlpk(model_path, depcfg.DLPK_IMPORT_DIR)
             model_path = res["model_path"]
     
@@ -611,9 +654,18 @@ def load_checkpoint(model_path, device, requested_num_classes=None):
             # EMD provides names only. Keep num_classes from the checkpoint/head
             # because it controls architecture construction and strict state loading.
             meta["class_names"] = emd_classes
+        b_info = emd_meta.get("BraeinAI", {}) if isinstance(emd_meta.get("BraeinAI"), dict) else {}
+        if b_info.get("ModelName"):
+            meta["model_name"] = b_info.get("ModelName")
+        elif emd_meta.get("ModelName") and emd_meta.get("ModelName") not in ("MaskRCNN", "FasterRCNN", "Unet", "DeepLabV3"):
+            meta["model_name"] = emd_meta.get("ModelName")
+        elif meta.get("model_name") in ("model", None, ""):
+            meta["model_name"] = os.path.splitext(os.path.basename(model_path))[0]
         meta["extra_info"] = dict(meta.get("extra_info") or {})
         meta["extra_info"]["emd_metadata_available"] = True
         meta["extra_info"]["emd_model_type"] = emd_meta.get("ModelType") or emd_meta.get("model_type")
+    elif meta.get("model_name") in ("model", None, ""):
+        meta["model_name"] = os.path.splitext(os.path.basename(model_path))[0]
 
     has_roi_heads = any(("roi_heads." in k) or ("detector.roi_heads." in k) for k in state_dict.keys())
     has_mask_head = any(("mask_predictor." in k) or ("detector.roi_heads.mask_predictor." in k) for k in state_dict.keys())
@@ -1062,7 +1114,7 @@ async def select_project(project_id: str):
             all_annotations.sort(key=lambda x: x["count"], reverse=True)
             best = all_annotations[0]
             training_state.annotation_data = {"features": best["features"]}; training_state.annotation_file_path = best["filepath"]; training_state.total_annotations = best["count"]
-            training_state.current_label = best["label"] if best["label"] != "unlabeled" else (next((l for l in training_state.class_names if l != "background"), "st"))
+            training_state.current_label = best["label"] if best["label"] != "unlabeled" else (next((l for l in training_state.class_names if l != "background"), "building"))
             training_state.selected_label = training_state.current_label
         return JSONResponse({"success": True, "project": project, "annotations_count": training_state.total_annotations, "current_project_id": project_id, "model_type_key": project.get("model_type_key", "unet"), "available_annotations": [{"filename": a["filename"], "count": a["count"], "label": a["label"]} for a in all_annotations]})
     except Exception as e:
@@ -1232,7 +1284,7 @@ async def get_status():
     })
 
 
-def capture_map_image(bounds: Dict, zoom: int, service_id: str = None, project_id: str = None) -> Dict:
+def capture_map_image(bounds: Dict, zoom: int, service_id: str = None, project_id: str = None, target_resolution: Optional[float] = None) -> Dict:
     service = MAP_SERVICES.get(service_id) or MAP_SERVICES.get(training_state.current_map_service) or MAP_SERVICES.get(DEFAULT_MAP_SERVICE)
     if not service: raise RuntimeError("No basemap service available.")
     
@@ -1243,6 +1295,23 @@ def capture_map_image(bounds: Dict, zoom: int, service_id: str = None, project_i
     def tile_x_to_lon(tx, z): return tx / (2 ** z) * 360.0 - 180.0
     def tile_y_to_lat(ty, z): return math.degrees(math.atan(math.sinh(math.pi - 2.0 * math.pi * ty / (2 ** z))))
     
+    # If target_resolution is specified in meters (e.g. 0.3m), automatically calculate the optimal tile zoom level
+    if target_resolution and float(target_resolution) > 0:
+        mid_lat = (north + south) / 2.0
+        cos_lat = max(0.1, math.cos(math.radians(mid_lat)))
+        calc_z = int(round(math.log2((156543.03392 * cos_lat) / float(target_resolution))))
+        calc_z = max(15, min(20, calc_z))
+        # Ensure the tile count fits within safe download budget (<= 256 tiles with threadpool)
+        while calc_z > 15:
+            xs = int(math.floor(lon_to_tile_x(west, calc_z)))
+            xe = int(math.floor(lon_to_tile_x(east, calc_z)))
+            ys = int(math.floor(lat_to_tile_y(north, calc_z)))
+            ye = int(math.floor(lat_to_tile_y(south, calc_z)))
+            if (xe - xs + 1) * (ye - ys + 1) <= 256:
+                break
+            calc_z -= 1
+        zoom = calc_z
+
     use_arcgis = bool(service.get("upstream")) or str(tile_url).startswith("/api/basemap/")
     if use_arcgis:
         import arcgis_service
@@ -1260,16 +1329,25 @@ def capture_map_image(bounds: Dict, zoom: int, service_id: str = None, project_i
     else:
         x_start, x_end, y_start, y_end = int(math.floor(lon_to_tile_x(west, zoom))), int(math.floor(lon_to_tile_x(east, zoom))), int(math.floor(lat_to_tile_y(north, zoom))), int(math.floor(lat_to_tile_y(south, zoom)))
         tile_count = (x_end - x_start + 1) * (y_end - y_start + 1)
-        if tile_count > 400: raise RuntimeError(f"Capture area too large ({tile_count} tiles). Zoom in or draw a smaller AOI.")
+        if tile_count > 500: raise RuntimeError(f"Capture area too large ({tile_count} tiles). Zoom in or draw a smaller AOI.")
         snapped_west, snapped_east, snapped_north, snapped_south = tile_x_to_lon(x_start, zoom), tile_x_to_lon(x_end + 1, zoom), tile_y_to_lat(y_start, zoom), tile_y_to_lat(y_end + 1, zoom)
-        tiles = []
-        for x in range(x_start, x_end + 1):
-            for y in range(y_start, y_end + 1):
-                url = tile_url.replace("{s}", "a").replace("{z}", str(zoom)).replace("{x}", str(x)).replace("{y}", str(y))
-                try:
-                    r = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
-                    if r.status_code == 200: tiles.append({"image": Image.open(BytesIO(r.content)), "x": x, "y": y})
-                except Exception: pass
+        
+        tile_coords = [(x, y) for x in range(x_start, x_end + 1) for y in range(y_start, y_end + 1)]
+        from concurrent.futures import ThreadPoolExecutor
+        def _fetch_single_tile(coord):
+            x, y = coord
+            u = tile_url.replace("{s}", "a").replace("{z}", str(zoom)).replace("{x}", str(x)).replace("{y}", str(y))
+            try:
+                r = requests.get(u, timeout=8, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+                if r.status_code == 200:
+                    return {"image": Image.open(BytesIO(r.content)).convert("RGB"), "x": x, "y": y}
+            except Exception:
+                pass
+            return None
+
+        with ThreadPoolExecutor(max_workers=16) as pool:
+            tiles = [t for t in pool.map(_fetch_single_tile, tile_coords) if t is not None]
+
         if not tiles: raise RuntimeError("No tiles downloaded")
         ts, w, h = 256, (x_end - x_start + 1) * 256, (y_end - y_start + 1) * 256
         stitched = Image.new("RGB", (w, h))
@@ -1279,23 +1357,44 @@ def capture_map_image(bounds: Dict, zoom: int, service_id: str = None, project_i
         stitched = stitched.crop(crop_box); w, h = stitched.size
         snapped_west, snapped_east, snapped_south, snapped_north = west, east, south, north
     
+    # If target_resolution is set, accurately resample stitched image to exact target meters/pixel
+    actual_gsd = compute_gsd_m_per_px({"west": snapped_west, "east": snapped_east, "south": snapped_south, "north": snapped_north}, w, h)
+    if target_resolution and float(target_resolution) > 0 and actual_gsd and actual_gsd > 0:
+        resample_scale = actual_gsd / float(target_resolution)
+        resample_scale = min(resample_scale, 4.0)
+        if abs(resample_scale - 1.0) > 0.02:
+            new_w = max(32, int(round(w * resample_scale)))
+            new_h = max(32, int(round(h * resample_scale)))
+            MAX_DIM = 4096
+            if max(new_w, new_h) > MAX_DIM:
+                down_k = float(MAX_DIM) / float(max(new_w, new_h))
+                new_w = max(32, int(round(new_w * down_k)))
+                new_h = max(32, int(round(new_h * down_k)))
+            stitched = stitched.resize((new_w, new_h), Image.Resampling.BICUBIC)
+            w, h = stitched.size
+            actual_gsd = compute_gsd_m_per_px({"west": snapped_west, "east": snapped_east, "south": snapped_south, "north": snapped_north}, w, h)
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:19]
     filename = f"map_capture_{timestamp}.png"
     filepath = os.path.join("uploads", filename)
     os.makedirs("uploads", exist_ok=True)
     stitched.save(filepath)
-    snapped_bounds = {"west": float(snapped_west), "south": float(snapped_south), "east": float(snapped_east), "north": float(snapped_north), "crs": "EPSG:4326", "zoom": int(zoom), "service": service_id, "image_width": int(w), "image_height": int(h)}
+    snapped_bounds = {"west": float(snapped_west), "south": float(snapped_south), "east": float(snapped_east), "north": float(snapped_north), "crs": "EPSG:4326", "zoom": int(zoom), "service": service_id, "image_width": int(w), "image_height": int(h), "gsd": round(actual_gsd or 0.0, 4)}
     
     training_state.image_path, training_state.image_url, training_state.image_width, training_state.image_height, training_state.image_bounds_latlon, training_state.image_crs = filepath, f"/uploads/{filename}", w, h, snapped_bounds, "EPSG:4326"
     if project_id: update_project(project_id, {"image_path": filepath, "bounds": snapped_bounds, "crs": "EPSG:4326"})
-    return {"success": True, "filepath": filepath, "image_url": training_state.image_url, "width": w, "height": h, "bounds": snapped_bounds, "crs": "EPSG:4326", "zoom": zoom}
+    return {"success": True, "filepath": filepath, "image_url": training_state.image_url, "width": w, "height": h, "bounds": snapped_bounds, "crs": "EPSG:4326", "zoom": zoom, "gsd": round(actual_gsd or 0.0, 4), "target_resolution": target_resolution}
 
 @app.post("/api/map/capture", dependencies=[Depends(require_api_key)])
 async def capture_map_area(data: Dict):
     try:
         bounds, zoom, service_id, project_id = data.get("bounds"), max(15, int(data.get("zoom", 12))), data.get("service_id", training_state.current_map_service), data.get("project_id", training_state.current_project_id)
+        target_resolution = data.get("target_resolution") or data.get("resolution_m")
+        if target_resolution is not None:
+            try: target_resolution = float(target_resolution)
+            except (TypeError, ValueError): target_resolution = None
         if not bounds: return JSONResponse({"error": "No bounds"}, status_code=400)
-        res = capture_map_image(bounds, zoom, service_id, project_id)
+        res = capture_map_image(bounds, zoom, service_id, project_id, target_resolution=target_resolution)
         return JSONResponse(res)
     except Exception as e:
         traceback.print_exc(); return JSONResponse({"error": str(e)}, status_code=500)
@@ -2172,7 +2271,26 @@ async def evaluate_model(data: Dict):
         model_path, threshold, split = data.get("model_path") or training_state.model_path, float(data.get("threshold", 0.5)), data.get("split", "test")
         if not project_id or not label or not model_path or not os.path.exists(model_path): return JSONResponse({"success": False, "error": "Project ID, Label, and Model checkpoint required"}, status_code=400)
         safe, lp, dataset_dir = label.lower().replace(" ", "_"), get_label_path(label.lower().replace(" ", "_")), os.path.join(get_label_path(label.lower().replace(" ", "_")), "dataset")
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu"); model, meta = load_checkpoint(model_path, device)
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if training_state.model_instance is not None and (training_state.model_path == model_path or os.path.abspath(str(training_state.model_path)) == os.path.abspath(str(model_path))):
+            model = training_state.model_instance
+            meta = {
+                "model_type": training_state.model_type,
+                "mode": training_state.mode,
+                "target_size": training_state.tile_size,
+                "tile_size": training_state.tile_size,
+                "class_names": training_state.class_names,
+                "architecture": training_state.architecture,
+                "backbone": training_state.model_backbone,
+                "best_iou": training_state.best_map
+            }
+        else:
+            model, meta = load_checkpoint(model_path, device)
+            training_state.model_instance, training_state.model_path = model, model_path
+            training_state.model_type, training_state.architecture = meta.get("model_type", "unet"), meta.get("architecture") or type(model).__name__
+            training_state.mode, training_state.class_names = meta.get("mode", "binary"), _normalise_model_class_names(meta)
+            training_state.tile_size = int(meta.get("tile_size", meta.get("target_size", 256)))
+            training_state.best_map = float(meta.get("best_iou", 0.0))
         model_type = normalize_model_type(meta.get("model_type", "unet")); is_native_detector = (hasattr(model, "roi_heads") or model_type in DETECTION_MODELS or model_type in INSTANCE_MODELS or meta.get("architecture") in ("MaskRCNN", "FasterRCNN"))
         sample_outputs = []
         if model_type == "yolo":
@@ -2387,7 +2505,7 @@ async def api_load_annotation_file(data: Dict):
 @app.post("/api/annotations/merge", dependencies=[Depends(require_api_key)])
 async def api_merge_annotations(data: Dict):
     try:
-        project_id, label = data.get("project_id") or training_state.current_project_id, data.get("label") or training_state.current_label or "st"
+        project_id, label = data.get("project_id") or training_state.current_project_id, data.get("label") or training_state.current_label or "building"
         if not project_id: return JSONResponse({"success": False, "error": "Project ID required"}, status_code=400)
         safe, all_features = label.lower().replace(" ", "_"), []
         if os.path.exists("annotations"):
@@ -2484,17 +2602,25 @@ async def list_models():
     try:
         print("--> Inside list_models() !!", flush=True)
         candidates = {}
-        source_priority = {"project": 0, "imported": 1, "dlpk": 2, "saved": 3}
+        source_priority = {"saved": 0, "project": 1, "imported": 2, "dlpk": 3}
 
         def add_candidate(fp, source):
             if not fp:
                 return
-            # IMMEDIATELY IGNORE TorchScript artifacts so we don't try to unpickle them
-            if ".torchscript" in fp.lower():
-                return
-            # Ignore vendored library weight files and internal python packages
             fp_norm = fp.lower().replace("\\", "/")
-            if any(ign in fp_norm for ign in ("/torchmetrics/", "/segment-anything/", "/segment_anything/", "/site-packages/", "/__pycache__/", "/.git/")):
+            # Ignore TorchScript, intermediate extraction artifacts, backups, and partial chunks
+            if any(ign in fp_norm for ign in (
+                ".torchscript",
+                "_from_dlpk",
+                ".bak",
+                ".part",
+                "/torchmetrics/",
+                "/segment-anything/",
+                "/segment_anything/",
+                "/site-packages/",
+                "/__pycache__/",
+                "/.git/"
+            )):
                 return
             try:
                 if not os.path.isfile(fp):
@@ -2514,7 +2640,29 @@ async def list_models():
             if current is None or candidate["priority"] < current["priority"]:
                 candidates[canonical] = candidate
 
-        # Project checkpoints: deterministic label and filename traversal.
+        # 1. User-saved models (.dlpk packages and curated checkpoints).
+        standard_saved = os.path.join("models", "saved")
+        known_dlpk_stems = set()
+        if os.path.isdir(standard_saved):
+            for filename in sorted(os.listdir(standard_saved), key=str.casefold):
+                if filename.lower().endswith(".dlpk"):
+                    stem = os.path.splitext(filename)[0].lower()
+                    known_dlpk_stems.add(stem)
+                    add_candidate(os.path.join(standard_saved, filename), "saved")
+            for filename in sorted(os.listdir(standard_saved), key=str.casefold):
+                if filename.lower().endswith((".pth", ".pt", ".ckpt")):
+                    stem = os.path.splitext(filename)[0].lower()
+                    if stem in known_dlpk_stems or stem.endswith("_1class"):
+                        continue
+                    add_candidate(os.path.join(standard_saved, filename), "saved")
+
+        # 2. Imported native checkpoints.
+        imported_dir = os.path.join("models", "imported")
+        if os.path.isdir(imported_dir):
+            for filename in sorted(os.listdir(imported_dir), key=str.casefold):
+                add_candidate(os.path.join(imported_dir, filename), "imported")
+
+        # 3. Project checkpoints: active model weights from label training.
         labels_root = "labels"
         if os.path.isdir(labels_root):
             for label_name in sorted(os.listdir(labels_root), key=str.casefold):
@@ -2524,32 +2672,32 @@ async def list_models():
                 for filename in sorted(os.listdir(model_dir), key=str.casefold):
                     add_candidate(os.path.join(model_dir, filename), "project")
 
-        # Imported native checkpoints.
-        imported_dir = os.path.join("models", "imported")
-        if os.path.isdir(imported_dir):
-            for filename in sorted(os.listdir(imported_dir), key=str.casefold):
-                add_candidate(os.path.join(imported_dir, filename), "imported")
+        # 4. Uploaded DLPK archives in _incoming (if not already known).
+        incoming_dir = os.path.join(depcfg.DLPK_IMPORT_DIR, "_incoming")
+        if os.path.isdir(incoming_dir):
+            for filename in sorted(os.listdir(incoming_dir), key=str.casefold):
+                if filename.lower().endswith(".dlpk"):
+                    stem = os.path.splitext(filename)[0].lower()
+                    base_stem = re.sub(r'_\d{8}_\d{6}$', '', stem)
+                    if base_stem not in known_dlpk_stems and stem not in known_dlpk_stems:
+                        add_candidate(os.path.join(incoming_dir, filename), "dlpk")
+                        known_dlpk_stems.add(base_stem)
+                        known_dlpk_stems.add(stem)
 
-        # DLPK extraction roots. Scan extracted model packages (1 directory deep).
-        dlpk_roots = [depcfg.DLPK_IMPORT_DIR, imported_dir]
-        for dlpk_root in dlpk_roots:
-            if not dlpk_root or not os.path.isdir(dlpk_root):
-                continue
-            for entry in sorted(os.listdir(dlpk_root), key=str.casefold):
+        # 5. DLPK extracted folders: ONLY scan if no corresponding .dlpk package exists.
+        if os.path.isdir(depcfg.DLPK_IMPORT_DIR):
+            for entry in sorted(os.listdir(depcfg.DLPK_IMPORT_DIR), key=str.casefold):
                 if entry.startswith("_") or entry.startswith("."):
                     continue
-                entry_path = os.path.join(dlpk_root, entry)
+                base_entry = re.sub(r'_\d{8}_\d{6}$', '', entry.lower())
+                if base_entry in known_dlpk_stems or entry.lower() in known_dlpk_stems:
+                    continue
+                entry_path = os.path.join(depcfg.DLPK_IMPORT_DIR, entry)
                 if os.path.isfile(entry_path):
                     add_candidate(entry_path, "dlpk")
                 elif os.path.isdir(entry_path):
                     for filename in sorted(os.listdir(entry_path), key=str.casefold):
                         add_candidate(os.path.join(entry_path, filename), "dlpk")
-
-        # User-saved copies.
-        standard_saved = os.path.join("models", "saved")
-        if os.path.isdir(standard_saved):
-            for filename in sorted(os.listdir(standard_saved), key=str.casefold):
-                add_candidate(os.path.join(standard_saved, filename), "saved")
 
         print(f"--> [list_models] CANDIDATES: {len(candidates)}", flush=True)
         models = []
@@ -2649,10 +2797,19 @@ async def list_models():
                 modified_ts, size_mb, modified = 0, 0.0, ""
 
             model_name = str(ckpt.get("model_name") or os.path.splitext(filename)[0])
-            label_value = str(
-                ckpt.get("label")
-                or os.path.basename(os.path.dirname(os.path.dirname(fp)))
-            )
+            if source == "project":
+                label_value = str(
+                    ckpt.get("label")
+                    or os.path.basename(os.path.dirname(os.path.dirname(fp)))
+                )
+            else:
+                fg_classes = [c for c in model_classes if str(c).lower().strip() not in ("background", "__background__", "nodata", "no_data", "1", "0", "")]
+                if fg_classes:
+                    label_value = fg_classes[0]
+                else:
+                    label_value = infer_foreground_class(model_name or filename, fallback=str(ckpt.get("label") or "building"))
+            if label_value.lower() in ("models", "saved", "dlpk", "dlpk_imported", "imported"):
+                label_value = infer_foreground_class(model_name or filename, fallback="building")
 
             models.append({
                 # Stable identity for clients that need a persistent option key.
@@ -2678,6 +2835,50 @@ async def list_models():
                 "is_dlpk": is_dlpk,
                 "is_finetuned": bool(ckpt.get("fine_tuned_from")),
             })
+
+        # Deduplicate models by logical identity so users never see repeated entries for the same model
+        deduped = {}
+        for m in models:
+            m_name = (m.get("model_name") or os.path.splitext(m.get("filename", ""))[0]).strip()
+            clean_name = re.sub(r'_\d{8}_\d{6}$', '', m_name)
+            dedup_key = clean_name.lower()
+            
+            if dedup_key not in deduped:
+                deduped[dedup_key] = m
+            else:
+                existing = deduped[dedup_key]
+                p_existing = source_priority.get(existing.get("source"), 99)
+                p_new = source_priority.get(m.get("source"), 99)
+                
+                replace = False
+                if p_new < p_existing:
+                    replace = True
+                elif p_new == p_existing:
+                    ext_is_dlpk = bool(existing.get("is_dlpk") or existing.get("filepath", "").lower().endswith(".dlpk"))
+                    new_is_dlpk = bool(m.get("is_dlpk") or m.get("filepath", "").lower().endswith(".dlpk"))
+                    if new_is_dlpk and not ext_is_dlpk:
+                        replace = True
+                    elif new_is_dlpk == ext_is_dlpk:
+                        fn_ext = os.path.splitext(os.path.basename(existing.get("filepath", "")))[0].lower()
+                        fn_new = os.path.splitext(os.path.basename(m.get("filepath", "")))[0].lower()
+                        if fn_new == dedup_key and fn_ext != dedup_key:
+                            replace = True
+                        elif fn_new != dedup_key and fn_ext == dedup_key:
+                            replace = False
+                        else:
+                            iou_ext = float(existing.get("best_iou") or 0.0)
+                            iou_new = float(m.get("best_iou") or 0.0)
+                            if iou_new > iou_ext:
+                                replace = True
+                            elif iou_new == iou_ext:
+                                mtime_ext = existing.get("modified_timestamp", 0)
+                                mtime_new = m.get("modified_timestamp", 0)
+                                if mtime_new > mtime_ext:
+                                    replace = True
+                if replace:
+                    deduped[dedup_key] = m
+        
+        models = list(deduped.values())
 
         # Stable alphabetical order. Modification time is metadata only and
         # must not cause the dropdown options to jump after saves/copies.
@@ -2769,17 +2970,32 @@ async def api_models_export(data: Dict):
 async def api_models_load(data: Dict):
     try:
         model_path, label = data.get("model_path"), data.get("label")
-        model_path = _safe_path(model_path, depcfg.MODEL_ROOTS + depcfg.EXPORT_ROOTS, "model_path")
+        model_path = _safe_path(model_path, depcfg.MODEL_ROOTS + depcfg.EXPORT_ROOTS + depcfg.EXTRA_READ_ROOTS, "model_path")
         if not model_path or not os.path.exists(model_path): return JSONResponse({"success": False, "error": "Model file not found"}, status_code=404)
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         model, meta = load_checkpoint(model_path, device)
         resolved_classes = _normalise_model_class_names(meta)
         # Commit only after model construction and strict checkpoint validation succeed.
-        training_state.model_instance, training_state.model_path, training_state.model_name = model, model_path, meta.get("model_name", os.path.splitext(os.path.basename(model_path))[0])
+        model_display_name = meta.get("model_name")
+        if not model_display_name or model_display_name.lower() in ("model", "none", "unknown"):
+            model_display_name = os.path.splitext(os.path.basename(model_path))[0]
+        
+        inferred_model_label = infer_foreground_class(model_display_name or model_path, fallback="")
+        if inferred_model_label:
+            resolved_classes = [inferred_model_label if str(c).strip().lower() in ("1", "0", "object", "class_1", "nodata", "no_data") else c for c in resolved_classes]
+            training_state.current_label = inferred_model_label
+        else:
+            fg_classes = [c for c in resolved_classes if str(c).lower().strip() not in ("background", "__background__", "nodata", "no_data", "1", "0", "")]
+            if fg_classes:
+                training_state.current_label = fg_classes[0]
+            else:
+                training_state.current_label = label if label and label not in ("object", "1", "0", "st", "default") else "building"
+
+        training_state.model_instance, training_state.model_path, training_state.model_name = model, model_path, model_display_name
         training_state.model_backbone, training_state.model_type, training_state.architecture = meta.get("backbone", "unet"), meta.get("model_type", "unet"), meta.get("architecture") or type(model).__name__
         training_state.mode, training_state.num_classes, training_state.class_names = meta.get("mode", "binary"), max(int(meta.get("num_classes", len(resolved_classes))), len(resolved_classes)), resolved_classes
         training_state.tile_size, training_state.best_map, training_state.training_completed, training_state.is_training = int(meta.get("tile_size", meta.get("target_size", 256))), float(meta.get("best_iou", 0.0)), True, False
-        return JSONResponse({"success": True, "model_path": model_path, "model_name": training_state.model_name, "backbone": training_state.model_backbone, "model_type": training_state.model_type, "architecture": training_state.architecture, "mode": training_state.mode, "class_names": training_state.class_names, "num_classes": training_state.num_classes, "tile_size": training_state.tile_size, "best_iou": training_state.best_map, "base_channels": meta.get("base_channels"), "num_levels": meta.get("num_levels"), "model_config": meta.get("model_config", {}), "extra_info": meta.get("extra_info", {}), "epoch": meta.get("epoch"), "bound_label": label, "bound_project_id": training_state.current_project_id})
+        return JSONResponse({"success": True, "model_path": model_path, "model_name": training_state.model_name, "backbone": training_state.model_backbone, "model_type": training_state.model_type, "architecture": training_state.architecture, "mode": training_state.mode, "class_names": training_state.class_names, "num_classes": training_state.num_classes, "tile_size": training_state.tile_size, "best_iou": training_state.best_map, "base_channels": meta.get("base_channels"), "num_levels": meta.get("num_levels"), "model_config": meta.get("model_config", {}), "extra_info": meta.get("extra_info", {}), "epoch": meta.get("epoch"), "bound_label": training_state.current_label, "label": training_state.current_label, "bound_project_id": training_state.current_project_id})
     except HTTPException: raise
     except Exception as e:
         traceback.print_exc(); return JSONResponse({"success": False, "error": str(e)}, status_code=500)
@@ -2984,6 +3200,14 @@ def _normalise_model_class_names(meta):
         names = ["background", "object"]
     if len(names) == 1:
         names.insert(0, "background")
+
+    model_identifier = str(meta.get("model_name") or meta.get("filename") or meta.get("model_path") or meta.get("filepath") or meta.get("label") or "")
+    inferred_fg = infer_foreground_class(model_identifier, fallback="")
+    if inferred_fg:
+        for idx in range(1, len(names)):
+            if str(names[idx]).strip().lower() in ("1", "0", "object", "class_1", "nodata", "no_data"):
+                names[idx] = inferred_fg
+
     return names
 
 
@@ -2998,8 +3222,69 @@ def _prediction_class_name(class_id, class_names):
     if 0 <= name_index < len(class_names):
         name = str(class_names[name_index]).strip()
         if name and name.lower() not in ("background", "__background__"):
+            if name.lower() in ("1", "0", "object", "class_1", "nodata", "no_data"):
+                inferred = infer_foreground_class(training_state.model_name or "")
+                if inferred != "object":
+                    return inferred
             return name
     return f"class_{idx}"
+
+
+def smooth_seam_cut(poly, internal_seams, max_dist=2.5, min_seg_len=12.0):
+    """
+    Smoothly curve artificial straight cut segments along internal chip seams,
+    eliminating knife-edge straight artifacts without altering uncut borders.
+    """
+    if poly.geom_type != "Polygon":
+        return poly
+    coords = list(poly.exterior.coords)
+    if len(coords) < 4:
+        return poly
+    new_coords = []
+    modified = False
+    for i in range(len(coords) - 1):
+        p1, p2 = coords[i], coords[i + 1]
+        is_seam_seg = False
+        seam_type = None
+        seg_len = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
+        if seg_len >= min_seg_len:
+            for sy in internal_seams.get("Y", []):
+                if abs(p1[1] - sy) <= max_dist and abs(p2[1] - sy) <= max_dist:
+                    is_seam_seg = True
+                    seam_type = ("H", sy)
+                    break
+            if not is_seam_seg:
+                for sx in internal_seams.get("X", []):
+                    if abs(p1[0] - sx) <= max_dist and abs(p2[0] - sx) <= max_dist:
+                        is_seam_seg = True
+                        seam_type = ("V", sx)
+                        break
+        if is_seam_seg:
+            modified = True
+            new_coords.append(p1)
+            cx = (p1[0] + p2[0]) / 2.0
+            cy = (p1[1] + p2[1]) / 2.0
+            poly_c = poly.centroid
+            vec_x = cx - poly_c.x
+            vec_y = cy - poly_c.y
+            deflection = min(seg_len * 0.18, 12.0)
+            if seam_type[0] == "H":
+                mid_p = (cx, cy + (deflection if vec_y > 0 else -deflection))
+            else:
+                mid_p = (cx + (deflection if vec_x > 0 else -deflection), cy)
+            p_arc1 = (0.75 * p1[0] + 0.25 * mid_p[0], 0.75 * p1[1] + 0.25 * mid_p[1])
+            p_arc2 = mid_p
+            p_arc3 = (0.25 * mid_p[0] + 0.75 * p2[0], 0.25 * mid_p[1] + 0.75 * p2[1])
+            new_coords.extend([p_arc1, p_arc2, p_arc3])
+        else:
+            new_coords.append(p1)
+    if not modified:
+        return poly
+    new_coords.append(new_coords[0])
+    p_new = ShapelyPolygon(new_coords)
+    if p_new.is_valid and not p_new.is_empty:
+        return p_new
+    return poly
 
 
 @app.post("/predict", dependencies=[Depends(require_api_key)])
@@ -3007,15 +3292,69 @@ async def predict_compat(data: Dict):
     prediction_started_at = time.perf_counter()
     try:
         model_path, image_path = data.get("model_path") or training_state.model_path, data.get("image_path") or training_state.image_path
-        bounds = data.get("bounds") or training_state.image_bounds_latlon; threshold = float(data.get("threshold", 0.5)); min_area = int(data.get("min_area", 20))
-        smooth_sigma = float(np.clip(data.get("smooth_sigma", 0.6), 0.0, 1.5)); simplify_tolerance = float(np.clip(data.get("simplify_tolerance", 0.008), 0.002, 0.03)); morph_close = bool(data.get("morph_close", False))
-        label = data.get("label") or training_state.current_label or "object"; safe_label = label.lower().replace(" ", "_"); aoi_bounds = data.get("aoi_bounds")
+        raster_path = data.get("raster_path")
+        bounds = data.get("bounds") or training_state.image_bounds_latlon
+        threshold = float(data.get("threshold", 0.35))
+        nms_threshold = float(data.get("nms_threshold", 0.20))
+        max_size_m = float(data.get("max_size_m", 150.0))
+        min_size_m = float(data.get("min_size_m", 2.0))
+        min_area = int(data.get("min_area", 0))
+        smooth_sigma = float(np.clip(data.get("smooth_sigma", 0.0), 0.0, 1.5))
+        simplify_tolerance = float(np.clip(data.get("simplify_tolerance", 0.001), 0.0005, 0.03))
+        morph_close = bool(data.get("morph_close", False))
+        loaded_fg = [c for c in (training_state.class_names or []) if str(c).lower().strip() not in ("background", "__background__", "nodata", "no_data", "1", "0", "")]
+        model_identifier = training_state.model_name or os.path.splitext(os.path.basename(model_path or ""))[0]
+        inferred_model_label = infer_foreground_class(model_identifier, fallback="")
+
+        if inferred_model_label:
+            default_model_label = inferred_model_label
+        elif loaded_fg:
+            default_model_label = loaded_fg[0]
+        elif training_state.current_label and training_state.current_label not in ("object", "1", "0", "st", "default"):
+            default_model_label = training_state.current_label
+        else:
+            default_model_label = "building"
+
+        req_label = data.get("label")
+        if req_label and req_label not in ("object", "1", "0", "st", "default", "unlabeled"):
+            safe_label = req_label.lower().replace(" ", "_")
+        else:
+            safe_label = default_model_label
+        aoi_bounds = data.get("aoi_bounds")
         
+        is_geotiff_mode = False
+        t_to_wgs84 = None
+        ds_transform = None
+        raster_bounds = None
+        win_offset_x, win_offset_y = 0, 0
+
+        if raster_path:
+            raster_path = _safe_path(raster_path, what="raster_path")
+            if raster_path and os.path.exists(raster_path):
+                is_geotiff_mode = True
+
         if not model_path or not os.path.exists(model_path): return JSONResponse({"success": False, "error": "Model not loaded"}, status_code=400)
-        if image_path: image_path = _safe_path(image_path, what="image_path")
-        if not image_path or not os.path.exists(image_path): return JSONResponse({"success": False, "error": "Image not found"}, status_code=400)
         
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu"); model, meta = load_checkpoint(model_path, device)
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if training_state.model_instance is not None and (training_state.model_path == model_path or os.path.abspath(str(training_state.model_path)) == os.path.abspath(str(model_path))):
+            model = training_state.model_instance
+            meta = {
+                "model_type": training_state.model_type,
+                "mode": training_state.mode,
+                "target_size": training_state.tile_size,
+                "tile_size": training_state.tile_size,
+                "class_names": training_state.class_names,
+                "architecture": training_state.architecture,
+                "backbone": training_state.model_backbone,
+                "best_iou": training_state.best_map
+            }
+        else:
+            model, meta = load_checkpoint(model_path, device)
+            training_state.model_instance, training_state.model_path = model, model_path
+            training_state.model_type, training_state.architecture = meta.get("model_type", "unet"), meta.get("architecture") or type(model).__name__
+            training_state.mode, training_state.class_names = meta.get("mode", "binary"), _normalise_model_class_names(meta)
+            training_state.tile_size = int(meta.get("tile_size", meta.get("target_size", 256)))
+            training_state.best_map = float(meta.get("best_iou", 0.0))
         model_type, mode, tile_size, eval_tf = normalize_model_type(meta.get("model_type", "unet")), meta["mode"], int(meta["target_size"]), get_eval_transform(meta["mode"])
         model_class_names = _normalise_model_class_names(meta)
         is_detector_model = hasattr(model, "roi_heads") or model_type in DETECTION_MODELS or model_type in INSTANCE_MODELS
@@ -3023,110 +3362,378 @@ async def predict_compat(data: Dict):
         prediction_label = model_foreground_name if (is_detector_model or len(model_class_names) > 2) else safe_label
         threshold, min_area = float(np.clip(threshold, 0.0, 1.0)), max(1, int(min_area))
         
-        img_pil = Image.open(image_path).convert("RGB"); W, H = img_pil.size
-        if not bounds or not all(k in bounds for k in ("west", "south", "east", "north")): bounds = {"west": 0.0, "south": float(H), "east": float(W), "north": 0.0}
-        gsd = compute_gsd_m_per_px(bounds, W, H)
+        if is_geotiff_mode:
+            import rasterio
+            from rasterio.transform import xy as raster_xy
+            from pyproj import Transformer
+            with rasterio.open(raster_path) as ds:
+                r_crs = ds.crs
+                ds_transform = ds.transform
+                W_full, H_full = ds.width, ds.height
+                r_res = (abs(ds.res[0]) + abs(ds.res[1])) / 2.0
+                gsd = r_res
+                t_to_wgs84 = Transformer.from_crs(r_crs, "EPSG:4326", always_xy=True).transform
+                
+                left, bottom, right, top = ds.bounds.left, ds.bounds.bottom, ds.bounds.right, ds.bounds.top
+                w_lon, s_lat = t_to_wgs84(left, bottom)
+                e_lon, n_lat = t_to_wgs84(right, top)
+                raster_bounds = {"west": float(w_lon), "south": float(s_lat), "east": float(e_lon), "north": float(n_lat)}
+                bounds = raster_bounds
+
+                if aoi_bounds and isinstance(aoi_bounds, dict):
+                    try:
+                        t_from_wgs84 = Transformer.from_crs("EPSG:4326", r_crs, always_xy=True).transform
+                        aoi_w_m, aoi_s_m = t_from_wgs84(float(aoi_bounds["west"]), float(aoi_bounds["south"]))
+                        aoi_e_m, aoi_n_m = t_from_wgs84(float(aoi_bounds["east"]), float(aoi_bounds["north"]))
+                        row_start, col_start = rasterio.transform.rowcol(ds_transform, min(aoi_w_m, aoi_e_m), max(aoi_s_m, aoi_n_m))
+                        row_end, col_end = rasterio.transform.rowcol(ds_transform, max(aoi_w_m, aoi_e_m), min(aoi_s_m, aoi_n_m))
+                        c_min = max(0, min(col_start, col_end))
+                        c_max = min(W_full, max(col_start, col_end))
+                        r_min = max(0, min(row_start, row_end))
+                        r_max = min(H_full, max(row_start, row_end))
+                        if c_max - c_min >= 64 and r_max - r_min >= 64:
+                            win = rasterio.windows.Window(c_min, r_min, c_max - c_min, r_max - r_min)
+                            win_offset_x, win_offset_y = c_min, r_min
+                            r_data = ds.read([1, 2, 3] if ds.count >= 3 else [1, 1, 1], window=win)
+                        else:
+                            r_data = ds.read([1, 2, 3] if ds.count >= 3 else [1, 1, 1])
+                    except Exception:
+                        r_data = ds.read([1, 2, 3] if ds.count >= 3 else [1, 1, 1])
+                else:
+                    r_data = ds.read([1, 2, 3] if ds.count >= 3 else [1, 1, 1])
+
+                r_data = np.transpose(r_data, (1, 2, 0))
+                img_pil = Image.fromarray(r_data.astype(np.uint8))
+                W, H = img_pil.size
+        else:
+            if image_path: image_path = _safe_path(image_path, what="image_path")
+            if not image_path or not os.path.exists(image_path): return JSONResponse({"success": False, "error": "Image not found"}, status_code=400)
+            img_pil = Image.open(image_path).convert("RGB"); W, H = img_pil.size
+            if not bounds or not all(k in bounds for k in ("west", "south", "east", "north")): bounds = {"west": 0.0, "south": float(H), "east": float(W), "north": 0.0}
+            gsd = compute_gsd_m_per_px(bounds, W, H)
+        
         is_detector = hasattr(model, "roi_heads") or model_type in DETECTION_MODELS or model_type in INSTANCE_MODELS or meta.get("architecture") in ("MaskRCNN", "FasterRCNN")
         
-        # FIX 2: Initialize these variables so they don't throw NameError
         features, raw_count = [], 0
         foreground_pixels = 0
         foreground_ratio = 0.0
         tiles_processed = 0
         components_kept = 0
         components_removed = 0
+        score_np = np.zeros((0,), dtype=np.float32)
         
         model.eval()
         
         if is_detector:
-            try: detection_scale = float(data.get("detection_scale") or 1.0)
-            except (TypeError, ValueError): detection_scale = 1.0
-            detection_scale = max(0.25, min(4.0, detection_scale)); tf = getattr(model, "transform", None)
-            if tf is not None and abs(detection_scale - 1.0) > 1e-6:
-                base = int(meta.get("tile_size") or meta.get("target_size") or 400); scaled = int(round(base * detection_scale))
-                tf.min_size, tf.max_size = (scaled,), scaled
-            
-            with torch.no_grad():
-                img_t = eval_tf(img_pil).to(device); preds = model([img_t])
-            p0 = preds[0] if preds else {}; scores, boxes, masks, pred_labels = p0.get("scores"), p0.get("boxes"), p0.get("masks"), p0.get("labels")
-            
-            score_np = scores.detach().cpu().numpy() if scores is not None else np.zeros((0,), dtype=np.float32); box_np = boxes.detach().cpu().numpy() if boxes is not None else np.zeros((0, 4), dtype=np.float32)
-            label_np = pred_labels.detach().cpu().numpy().astype(int) if pred_labels is not None else np.ones((len(score_np),), dtype=np.int64)
-            mask_np = None
-            if masks is not None:
-                mask_np = masks.detach().cpu().numpy(); mask_np = mask_np[:, 0] if mask_np.ndim == 4 else mask_np
-            
-            if model_type == "mask_rcnn" or meta.get("architecture") == "MaskRCNN":
-                valid_indices = [i for i in range(len(score_np)) if float(score_np[i]) >= threshold and mask_np is not None and i < len(mask_np)]
-                if valid_indices:
-                    valid_indices.sort(key=lambda idx: float(score_np[idx]), reverse=True)
-                    combined_mask = np.zeros((H, W), dtype=np.uint8)
-                    conf_map = np.zeros((H, W), dtype=np.float32)
+            detector_tile_size = int(data.get("tile_size") or meta.get("tile_size") or meta.get("target_size") or 256)
+            if detector_tile_size <= 0: detector_tile_size = 256
+            detector_overlap = max(64, int(detector_tile_size * 0.25))
+            detector_stride = max(1, detector_tile_size - detector_overlap)
 
-                    for i in valid_indices:
-                        mk = mask_np[i]
-                        if mk.shape != (H, W): mk = cv2.resize(mk.astype(np.float32), (W, H), interpolation=cv2.INTER_LINEAR)
-                        binary = (mk > 0.5).astype(np.uint8)
-                        combined_mask = np.maximum(combined_mask, binary)
-                        conf_map = np.maximum(conf_map, binary.astype(np.float32) * float(score_np[i]))
+            # Calibrated threshold directly from user UI input (no hardcoded override)
+            eff_threshold = max(0.01, min(0.99, threshold))
 
-                    # 1. Close seams & gaps between roof facets belonging to the same building
-                    k_size = 11 if morph_close else 7
-                    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k_size, k_size))
-                    combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel, iterations=1)
-
-                    if smooth_sigma > 0:
-                        blurred = cv2.GaussianBlur(combined_mask.astype(np.float32), (5, 5), sigmaX=smooth_sigma, sigmaY=smooth_sigma)
-                        combined_mask = (blurred > 0.4).astype(np.uint8)
-
-                    # 2. Fill internal holes (e.g. shadowed roof areas, vents, inner patios) so buildings are 100% solid
-                    ext_contours, _ = cv2.findContours(combined_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                    filled_mask = np.zeros_like(combined_mask)
-                    cv2.drawContours(filled_mask, ext_contours, -1, 1, -1)
-                    combined_mask = filled_mask
-
-                    num_labels, comp_labels, comp_stats, _ = cv2.connectedComponentsWithStats(combined_mask, connectivity=8)
-                    for comp_id in range(1, num_labels):
-                        c_area = int(comp_stats[comp_id, cv2.CC_STAT_AREA])
-                        if c_area < min_area: continue
-                        comp_mask = (comp_labels == comp_id).astype(np.uint8)
-                        contours, _ = cv2.findContours(comp_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                        if not contours: continue
-                        max_cnt = max(contours, key=cv2.contourArea)
-                        c_conf = float(np.max(conf_map[comp_labels == comp_id])) if np.any(comp_labels == comp_id) else float(threshold)
-
-                        feat = _feature_from_polygon_contour(
-                            max_cnt, comp_mask, bounds, W, H, prediction_label,
-                            area_geo_factor=(gsd * gsd if gsd else None),
-                            confidence=c_conf,
-                            model_iou=training_state.best_map,
-                            min_area=min_area,
-                            simplify_tolerance=simplify_tolerance
-                        )
-                        if feat is not None:
-                            feat["properties"]["instance_id"] = len(features) + 1
-                            feat["properties"]["class_id"] = 1
-                            feat["properties"]["class_name"] = prediction_label
-                            feat["properties"]["label"] = prediction_label
-                            try:
-                                poly = ShapelyPolygon(feat["geometry"]["coordinates"][0])
-                                b = poly.bounds
-                                feat["bbox"] = [round(b[0], 7), round(b[1], 7), round(b[2], 7), round(b[3], 7)]
-                            except Exception: pass
-                            features.append(feat); raw_count += 1
+            chips = []
+            if W <= detector_tile_size and H <= detector_tile_size:
+                chips.append((0, 0))
             else:
-                for i, score in enumerate(score_np):
-                    score = float(score)
-                    if score < threshold or i >= len(box_np): continue
-                    class_id = int(label_np[i]) if i < len(label_np) else 1
-                    class_name = _prediction_class_name(class_id, model_class_names)
-                    if class_name.lower() in ("nodata", "no_data", "background", "__background__"):
-                        class_name = prediction_label if prediction_label.lower() not in ("nodata", "no_data", "background") else "Building"
-                    x1, y1, x2, y2 = box_np[i]
-                    ring = [[float(bounds["west"]) + x1 / max(W, 1) * (float(bounds["east"]) - float(bounds["west"])), float(bounds["north"]) - y1 / max(H, 1) * (float(bounds["north"]) - float(bounds["south"]))], [float(bounds["west"]) + x2 / max(W, 1) * (float(bounds["east"]) - float(bounds["west"])), float(bounds["north"]) - y1 / max(H, 1) * (float(bounds["north"]) - float(bounds["south"]))], [float(bounds["west"]) + x2 / max(W, 1) * (float(bounds["east"]) - float(bounds["west"])), float(bounds["north"]) - y2 / max(H, 1) * (float(bounds["north"]) - float(bounds["south"]))], [float(bounds["west"]) + x1 / max(W, 1) * (float(bounds["east"]) - float(bounds["west"])), float(bounds["north"]) - y2 / max(H, 1) * (float(bounds["north"]) - float(bounds["south"]))]]; ring.append(ring[0])
-                    poly = ShapelyPolygon(ring)
-                    b = poly.bounds
-                    features.append({"type": "Feature", "bbox": [round(b[0], 7), round(b[1], 7), round(b[2], 7), round(b[3], 7)], "geometry": {"type": "Polygon", "coordinates": [ring]}, "properties": {"class_name": class_name, "label": class_name, "class_id": class_id, "confidence": round(score, 4), "model_iou": float(meta.get("best_iou", training_state.best_map)), "instance_id": len(features) + 1, "pix_bbox": f"{x1:.1f},{y1:.1f},{x2:.1f},{y2:.1f}"}}); raw_count += 1
+                ys = list(range(0, max(H - detector_tile_size, 0) + 1, detector_stride)) or [0]
+                xs = list(range(0, max(W - detector_tile_size, 0) + 1, detector_stride)) or [0]
+                if ys[-1] != max(H - detector_tile_size, 0): ys.append(max(H - detector_tile_size, 0))
+                if xs[-1] != max(W - detector_tile_size, 0): xs.append(max(W - detector_tile_size, 0))
+
+                for cy in ys:
+                    for cx in xs:
+                        chips.append((cx, cy))
+
+            print(f"[PREDICT] Starting tiled detector inference: {len(chips)} chips of size {detector_tile_size}x{detector_tile_size} (overlap={detector_overlap}px) | thresh={eff_threshold:.2f} nms={nms_threshold:.2f} max_size={max_size_m}m min_size={min_size_m}m", flush=True)
+            raw_items = []
+            m_per_px = float(gsd) if (gsd and gsd > 0) else 0.30
+            padding = max(16, min(64, detector_overlap // 2))
+            batch_size = 4
+
+            import torchvision.transforms.functional as TF
+            from shapely.ops import unary_union
+            full_tensor = TF.to_tensor(img_pil).to(device)
+
+            with torch.inference_mode():
+                for b_start in range(0, len(chips), batch_size):
+                    b_chips = chips[b_start:b_start + batch_size]
+                    b_tensors = []
+                    valid_b_chips = []
+                    for ox, oy in b_chips:
+                        chip_t = full_tensor[:, oy:oy + detector_tile_size, ox:ox + detector_tile_size]
+                        if chip_t.shape[1] != detector_tile_size or chip_t.shape[2] != detector_tile_size:
+                            pad_h = detector_tile_size - chip_t.shape[1]
+                            pad_w = detector_tile_size - chip_t.shape[2]
+                            chip_t = torch.nn.functional.pad(chip_t, (0, pad_w, 0, pad_h), mode="replicate")
+                        if chip_t.std() < 0.005:
+                            continue
+                        b_tensors.append(chip_t)
+                        valid_b_chips.append((ox, oy))
+
+                    if not b_tensors:
+                        continue
+
+                    preds_list = model(b_tensors)
+                    for (ox, oy), preds in zip(valid_b_chips, preds_list):
+                        tiles_processed += 1
+                        c_boxes = preds.get("boxes", torch.empty((0, 4))).cpu().detach().numpy()
+                        c_scores = preds.get("scores", torch.empty(0)).cpu().detach().numpy()
+                        c_masks = preds.get("masks", None)
+                        if c_masks is not None: c_masks = c_masks.cpu().detach().numpy()
+                        c_labels = preds.get("labels", torch.empty(0, dtype=torch.int64)).cpu().detach().numpy()
+
+                        is_left_internal = (ox > 0)
+                        is_top_internal = (oy > 0)
+                        is_right_internal = (ox + detector_tile_size < W)
+                        is_bottom_internal = (oy + detector_tile_size < H)
+
+                        for i in range(len(c_scores)):
+                            s = float(c_scores[i])
+                            if s < eff_threshold: continue
+                            b = c_boxes[i]
+                            bw, bh = float(b[2] - b[0]), float(b[3] - b[1])
+                            if min(bw, bh) < 4: continue
+
+                            # Check if touching internal tile seam
+                            touch_left = is_left_internal and (b[0] <= 3)
+                            touch_right = is_right_internal and (b[2] >= detector_tile_size - 3)
+                            touch_top = is_top_internal and (b[1] <= 3)
+                            touch_bottom = is_bottom_internal and (b[3] >= detector_tile_size - 3)
+                            touches_internal = touch_left or touch_right or touch_top or touch_bottom
+
+                            # Proposal centroid in chip local coordinates
+                            cx_loc = (b[0] + b[2]) / 2.0
+                            cy_loc = (b[1] + b[3]) / 2.0
+
+                            # Centroid Margin Filter (ESRI ArcGISInstanceDetector):
+                            # If an object is cut at the internal border and its centroid lies in the outer overlap margin,
+                            # drop it because the adjacent overlapping chip (which sees this structure centered) owns it.
+                            if (touch_left and cx_loc < padding) or \
+                               (touch_right and cx_loc > detector_tile_size - padding) or \
+                               (touch_top and cy_loc < padding) or \
+                               (touch_bottom and cy_loc > detector_tile_size - padding):
+                                continue
+
+                            # Real-world metric dimensions
+                            w_m = bw * m_per_px
+                            h_m = bh * m_per_px
+
+                            # Min size filter
+                            if min_size_m > 0 and (w_m < min_size_m or h_m < min_size_m):
+                                continue
+
+                            # Max size filter (GeoAI Model Hub rule: max building size <= max_size_m and area <= max_size_m^2)
+                            if max_size_m > 0:
+                                if w_m > max_size_m or h_m > max_size_m or (w_m * h_m) > (max_size_m * max_size_m):
+                                    continue
+
+                            # Aspect ratio filter (eliminates edge slice streaks)
+                            aspect_ratio = max(w_m, h_m) / max(0.1, min(w_m, h_m))
+                            if aspect_ratio > 4.5:
+                                continue
+
+                            # Suppress high-aspect ratio edge slivers on internal seams (GeoAI Model Hub rule)
+                            if touches_internal and aspect_ratio > 1.50:
+                                continue
+
+                            lbl = int(c_labels[i]) if (c_labels is not None and i < len(c_labels)) else 1
+                            gx1, gy1, gx2, gy2 = float(b[0] + ox), float(b[1] + oy), float(b[2] + ox), float(b[3] + oy)
+
+                            poly_shp = None
+                            if c_masks is not None and i < len(c_masks):
+                                try:
+                                    m_tile = (c_masks[i, 0] > 0.5).astype(np.uint8)
+                                    bx1, by1, bx2, by2 = map(int, [max(0, b[0]), max(0, b[1]), min(detector_tile_size, b[2]), min(detector_tile_size, b[3])])
+                                    crop_m = np.zeros_like(m_tile)
+                                    crop_m[by1:by2, bx1:bx2] = m_tile[by1:by2, bx1:bx2]
+
+                                    contours, _ = cv2.findContours(crop_m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                                    if contours:
+                                        c = max(contours, key=cv2.contourArea)
+                                        c_approx = cv2.approxPolyDP(c, epsilon=1.2, closed=True)
+                                        pts = [(int(pt[0][0]) + ox, int(pt[0][1]) + oy) for pt in c_approx]
+                                        if len(pts) >= 3:
+                                            pts.append(pts[0])
+                                            p = ShapelyPolygon(pts)
+                                            if not p.is_valid: p = p.buffer(0)
+                                            if not p.is_empty: poly_shp = p
+                                except Exception:
+                                    poly_shp = None
+
+                            if poly_shp is None:
+                                p = ShapelyPolygon([[gx1, gy1], [gx2, gy1], [gx2, gy2], [gx1, gy2], [gx1, gy1]])
+                                if p.is_valid and not p.is_empty: poly_shp = p
+                                else: continue
+
+                            c_name = _prediction_class_name(lbl, model_class_names)
+                            if str(c_name).strip() in ("1", "0", "", "Class_1", "Object", "object", "nodata", "no_data", "background", "__background__"):
+                                c_name = default_model_label
+
+                            raw_items.append({
+                                "b_px": [gx1, gy1, gx2, gy2],
+                                "score": s,
+                                "lbl": lbl,
+                                "c_name": c_name,
+                                "poly": poly_shp,
+                                "touches_internal": touches_internal,
+                                "w_m": w_m, "h_m": h_m
+                            })
+
+            # Pre-NMS Seam Healing & Complete Feature Prioritization
+            suppressed = set()
+            for i in range(len(raw_items)):
+                if i in suppressed: continue
+                cur = raw_items[i]
+                for j in range(i + 1, len(raw_items)):
+                    if j in suppressed: continue
+                    oth = raw_items[j]
+                    if not cur["poly"].intersects(oth["poly"]): continue
+                    try:
+                        inter = cur["poly"].intersection(oth["poly"])
+                        min_a = min(cur["poly"].area, oth["poly"].area)
+                        if min_a <= 0: continue
+                        overlap_ratio = inter.area / min_a
+
+                        # If one detection touches an internal seam and the other is complete (uncut),
+                        # the complete uncut detection supersedes the seam-cut fragment!
+                        if cur["touches_internal"] and not oth["touches_internal"] and overlap_ratio > 0.35:
+                            suppressed.add(i)
+                            break
+                        elif oth["touches_internal"] and not cur["touches_internal"] and overlap_ratio > 0.35:
+                            suppressed.add(j)
+                            continue
+
+                        # Complementary Union: Heal structures split across tile seams into a single unified whole
+                        u = cur["poly"].union(oth["poly"])
+                        if u.geom_type == "MultiPolygon":
+                            u = unary_union([cur["poly"].buffer(1.5), oth["poly"].buffer(1.5)]).buffer(-1.5)
+
+                        if u.is_valid and not u.is_empty:
+                            if u.geom_type == "Polygon" and u.area >= max(cur["poly"].area, oth["poly"].area) and u.area <= (cur["poly"].area + oth["poly"].area):
+                                cur["poly"] = u
+                                cur["score"] = max(cur["score"], oth["score"])
+                                cur["b_px"] = [
+                                    min(cur["b_px"][0], oth["b_px"][0]),
+                                    min(cur["b_px"][1], oth["b_px"][1]),
+                                    max(cur["b_px"][2], oth["b_px"][2]),
+                                    max(cur["b_px"][3], oth["b_px"][3])
+                                ]
+                                cur["touches_internal"] = cur["touches_internal"] and oth["touches_internal"]
+                                suppressed.add(j)
+                    except Exception:
+                        pass
+
+            healed_items = []
+            for i in range(len(raw_items)):
+                if i in suppressed: continue
+                it = raw_items[i]
+                if it["touches_internal"] and (it["poly"].area < 450 or min(it["w_m"], it["h_m"]) < 3.5):
+                    continue
+                healed_items.append(it)
+
+            # Post-Healing NMS & Containment Deduplication
+            healed_items.sort(key=lambda x: x["score"], reverse=True)
+            final_kept = []
+            for cur in healed_items:
+                is_dup = False
+                cb = cur["b_px"]
+                cur_area = (cb[2] - cb[0]) * (cb[3] - cb[1])
+                for prev in final_kept:
+                    pb = prev["b_px"]
+                    prev_area = (pb[2] - pb[0]) * (pb[3] - pb[1])
+                    ix1, iy1 = max(cb[0], pb[0]), max(cb[1], pb[1])
+                    ix2, iy2 = min(cb[2], pb[2]), min(cb[3], pb[3])
+                    iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
+                    inter_box = iw * ih
+                    union_box = cur_area + prev_area - inter_box
+                    iou = inter_box / max(1.0, union_box)
+                    min_box = min(cur_area, prev_area)
+                    containment = inter_box / max(1.0, min_box)
+                    if iou > nms_threshold or containment > 0.85:
+                        is_dup = True
+                        break
+                if not is_dup:
+                    final_kept.append(cur)
+
+            # Smooth any remaining seam cuts into natural curved borders
+            internal_seam_coords = {
+                "X": [ox for ox in xs if 0 < ox < W],
+                "Y": [oy for oy in ys if 0 < oy < H]
+            }
+
+            for item in final_kept:
+                poly_shp = item["poly"]
+                if item["touches_internal"]:
+                    try:
+                        poly_shp = smooth_seam_cut(poly_shp, internal_seam_coords)
+                    except Exception:
+                        pass
+                try:
+                    poly_shp = poly_shp.simplify(1.0, preserve_topology=True)
+                except Exception:
+                    pass
+                item["poly"] = poly_shp
+
+            west, east = float(bounds["west"]), float(bounds["east"])
+            south, north = float(bounds["south"]), float(bounds["north"])
+
+            for item in final_kept:
+                poly_shp = item["poly"]
+
+                # Convert pixel polygon to georeferenced coordinates
+                def px_to_geo(px, py):
+                    if is_geotiff_mode and ds_transform is not None and t_to_wgs84 is not None:
+                        rx = win_offset_x + px
+                        ry = win_offset_y + py
+                        proj_x, proj_y = raster_xy(ds_transform, ry, rx)
+                        lon, lat = t_to_wgs84(proj_x, proj_y)
+                    else:
+                        lon = west + (px / max(W, 1)) * (east - west)
+                        lat = north - (py / max(H, 1)) * (north - south)
+                    return round(float(lon), 7), round(float(lat), 7)
+
+                if poly_shp.geom_type == "Polygon":
+                    geo_rings = [[[px_to_geo(pt[0], pt[1])[0], px_to_geo(pt[0], pt[1])[1]] for pt in poly_shp.exterior.coords]]
+                    for interior in poly_shp.interiors:
+                        geo_rings.append([[px_to_geo(pt[0], pt[1])[0], px_to_geo(pt[0], pt[1])[1]] for pt in interior.coords])
+                    geom_out = {"type": "Polygon", "coordinates": geo_rings}
+                elif poly_shp.geom_type == "MultiPolygon":
+                    multi_coords = []
+                    for p in poly_shp.geoms:
+                        p_rings = [[[px_to_geo(pt[0], pt[1])[0], px_to_geo(pt[0], pt[1])[1]] for pt in p.exterior.coords]]
+                        for interior in p.interiors:
+                            p_rings.append([[px_to_geo(pt[0], pt[1])[0], px_to_geo(pt[0], pt[1])[1]] for pt in interior.coords])
+                        multi_coords.append(p_rings)
+                    geom_out = {"type": "MultiPolygon", "coordinates": multi_coords}
+                else:
+                    continue
+
+                b_px = item["b_px"]
+                px_area = poly_shp.area
+                b_geo_x1, b_geo_y1 = px_to_geo(b_px[0], b_px[3])
+                b_geo_x2, b_geo_y2 = px_to_geo(b_px[2], b_px[1])
+                geo_bbox = [b_geo_x1, b_geo_y1, b_geo_x2, b_geo_y2]
+
+                feat = {
+                    "type": "Feature",
+                    "bbox": geo_bbox,
+                    "geometry": geom_out,
+                    "properties": {
+                        "instance_id": len(features) + 1,
+                        "class_id": item["lbl"],
+                        "class_name": item["c_name"],
+                        "label": item["c_name"],
+                        "confidence": round(float(item["score"]), 4),
+                        "model_iou": float(meta.get("best_iou", training_state.best_map)),
+                        "area_px": round(float(px_area), 1),
+                        "area_m2": (round(float(px_area * gsd * gsd), 2) if gsd else None),
+                        "pix_bbox": f"{b_px[0]:.1f},{b_px[1]:.1f},{b_px[2]:.1f},{b_px[3]:.1f}"
+                    }
+                }
+                features.append(feat)
+                raw_count += 1
         else:
             stride, prob_sum, prob_weight = max(1, int(tile_size * 0.8)), np.zeros((H, W), dtype=np.float32), np.zeros((H, W), dtype=np.float32)
             ys, xs = list(range(0, max(H - tile_size, 0) + 1, stride)) or [0], list(range(0, max(W - tile_size, 0) + 1, stride)) or [0]
@@ -3148,9 +3755,7 @@ async def predict_compat(data: Dict):
                         prob_sum[y:y2, x:x2] += tile_prob; prob_weight[y:y2, x:x2] += 1.0; tiles_processed += 1
             
             prob_map = np.divide(prob_sum, np.maximum(prob_weight, 1e-6), out=np.zeros_like(prob_sum), where=prob_weight > 0)
-            prob_for_mask = cv2.GaussianBlur(prob_map, (3, 3), sigmaX=smooth_sigma, sigmaY=smooth_sigma, borderType=cv2.BORDER_REPLICATE) if smooth_sigma > 0 else prob_map
-            mask_bool = prob_for_mask >= threshold
-            if morph_close: mask_bool = cv2.morphologyEx(mask_bool.astype(np.uint8), cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)), iterations=1).astype(bool)
+            mask_bool = prob_map >= threshold
             
             foreground_pixels = int(np.count_nonzero(mask_bool))
             foreground_ratio = float(foreground_pixels / max(H * W, 1))
@@ -3161,7 +3766,7 @@ async def predict_compat(data: Dict):
                 if pixel_area < min_area: components_removed += 1; continue
                 component_mask = (component_labels == component_id).astype(np.uint8); contours, _ = cv2.findContours(component_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                 if not contours: continue
-                feat = _feature_from_polygon_contour(max(contours, key=cv2.contourArea), prob_map, bounds, W, H, prediction_label, area_geo_factor=(gsd * gsd if gsd else None), confidence=float(np.mean(prob_map[component_labels == component_id])), model_iou=training_state.best_map, min_area=1, simplify_tolerance=simplify_tolerance)
+                feat = _feature_from_polygon_contour(max(contours, key=cv2.contourArea), prob_map, bounds, W, H, prediction_label, area_geo_factor=(gsd * gsd if gsd else None), confidence=float(np.mean(prob_map[component_labels == component_id])), model_iou=training_state.best_map, min_area=0, simplify_tolerance=0.001)
                 if feat is not None: feat["properties"]["pixel_count"] = pixel_area; feat["properties"]["confidence"] = round(float(np.mean(prob_map[component_labels == component_id])), 4); features.append(feat); components_kept += 1
 
         dropped = 0
@@ -3220,7 +3825,8 @@ async def predict_compat(data: Dict):
             except Exception as shp_err:
                 print(f"[predict] Shapefile export warning: {shp_err}")
         
-        return JSONResponse({"success": True, "geojson": geojson, "num_objects": len(features), "duration_seconds": round(time.perf_counter() - prediction_started_at, 2), "shp_url": shp_url, "model": {"checkpoint": os.path.basename(os.path.abspath(model_path)), "epoch": meta.get("epoch", "unknown"), "architecture": meta.get("architecture", model_type), "model_type": model_type, "mode": mode, "tile_size": tile_size, "threshold": threshold, "min_area": min_area, "smooth_sigma": smooth_sigma, "simplify_tolerance": simplify_tolerance, "morph_close": morph_close}, "diagnostics": {"native_detector": is_detector, "semantic_tiles_processed": tiles_processed if not is_detector else None, "semantic_foreground_pixels": foreground_pixels if not is_detector else None, "semantic_foreground_ratio": foreground_ratio if not is_detector else None, "semantic_components_kept": components_kept if not is_detector else None, "semantic_components_removed": components_removed if not is_detector else None, "postprocessing": ({"smooth_sigma": smooth_sigma, "simplify_tolerance": simplify_tolerance, "morph_close": morph_close, "min_area": min_area} if not is_detector else None), "raw_detector_instances": raw_count if is_detector else None, "aoi_clip": ({"kept": len(features), "dropped": dropped} if dropped or aoi_bounds else None)}})
+        max_conf = round(float(np.max(score_np)), 4) if (is_detector and len(score_np)) else None
+        return JSONResponse({"success": True, "geojson": geojson, "num_objects": len(features), "max_confidence": max_conf, "raw_candidate_count": int(len(score_np)) if is_detector else None, "duration_seconds": round(time.perf_counter() - prediction_started_at, 2), "shp_url": shp_url, "raster_bounds": raster_bounds, "is_geotiff": is_geotiff_mode, "model": {"checkpoint": os.path.basename(os.path.abspath(model_path)), "epoch": meta.get("epoch", "unknown"), "architecture": meta.get("architecture", model_type), "model_type": model_type, "mode": mode, "tile_size": tile_size, "threshold": threshold, "min_area": min_area, "smooth_sigma": smooth_sigma, "simplify_tolerance": simplify_tolerance, "morph_close": morph_close}, "diagnostics": {"native_detector": is_detector, "semantic_tiles_processed": tiles_processed if not is_detector else None, "semantic_foreground_pixels": foreground_pixels if not is_detector else None, "semantic_foreground_ratio": foreground_ratio if not is_detector else None, "semantic_components_kept": components_kept if not is_detector else None, "semantic_components_removed": components_removed if not is_detector else None, "postprocessing": ({"smooth_sigma": smooth_sigma, "simplify_tolerance": simplify_tolerance, "morph_close": morph_close, "min_area": min_area} if not is_detector else None), "raw_detector_instances": raw_count if is_detector else None, "aoi_clip": ({"kept": len(features), "dropped": dropped} if dropped or aoi_bounds else None)}})
     except HTTPException: raise
     except Exception as e:
         traceback.print_exc(); return JSONResponse({"success": False, "error": str(e)}, status_code=500)
@@ -3338,7 +3944,26 @@ async def api_evaluate_geojson(data: Dict):
         if not chip_bounds_all: return JSONResponse({"success": False, "error": "chip_bounds.json is missing or empty. Rebuild the dataset before evaluation."}, status_code=400)
         img_files = [f for f in sorted(os.listdir(img_dir)) if f.lower().endswith((".png", ".jpg", ".jpeg")) and not f.endswith("_vis.png") and not f.endswith("_ov.png") and not f.endswith("_ids.png")]
         if not img_files: return JSONResponse({"success": False, "error": f"No image chips found in {img_dir}"}, status_code=400)
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu"); model, meta = load_checkpoint(model_path, device)
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if training_state.model_instance is not None and (training_state.model_path == model_path or os.path.abspath(str(training_state.model_path)) == os.path.abspath(str(model_path))):
+            model = training_state.model_instance
+            meta = {
+                "model_type": training_state.model_type,
+                "mode": training_state.mode,
+                "target_size": training_state.tile_size,
+                "tile_size": training_state.tile_size,
+                "class_names": training_state.class_names,
+                "architecture": training_state.architecture,
+                "backbone": training_state.model_backbone,
+                "best_iou": training_state.best_map
+            }
+        else:
+            model, meta = load_checkpoint(model_path, device)
+            training_state.model_instance, training_state.model_path = model, model_path
+            training_state.model_type, training_state.architecture = meta.get("model_type", "unet"), meta.get("architecture") or type(model).__name__
+            training_state.mode, training_state.class_names = meta.get("mode", "binary"), _normalise_model_class_names(meta)
+            training_state.tile_size = int(meta.get("tile_size", meta.get("target_size", 256)))
+            training_state.best_map = float(meta.get("best_iou", 0.0))
         mode, tile_size, model_type, eval_tf = meta.get("mode", "binary"), int(meta.get("target_size") or meta.get("tile_size") or 64), normalize_model_type(meta.get("model_type", "unet")), get_eval_transform(meta.get("mode", "binary"))
         gt_features, pred_features, chips_skipped_no_bounds, processed_chip_names = [], [], [], []
         inst_tp = inst_fp = inst_fn = 0; inst_ious, iou_list, f1_list, prec_list, rec_list = [], [], [], [], []

@@ -624,33 +624,90 @@
                         </div>
                         <div class="predict-right">
                             <div class="config-section">
+                                <div class="section-title">🗺️ INPUT SOURCE</div>
+                                <div class="config-row" style="gap:4px;margin-bottom:6px;">
+                                    <button class="btn btn-xs" type="button" id="btnSourceBasemap" onclick="setPredictSource('basemap')" style="flex:1;background:#0369a1;border:1px solid #38bdf8;color:#fff;padding:4px 6px;border-radius:4px;font-size:10px;font-weight:600;">
+                                        <i class="fas fa-map"></i> Basemap View
+                                    </button>
+                                    <button class="btn btn-xs" type="button" id="btnSourceRaster" onclick="setPredictSource('raster')" style="flex:1;background:#1e293b;border:1px solid #334155;color:#94a3b8;padding:4px 6px;border-radius:4px;font-size:10px;font-weight:600;">
+                                        <i class="fas fa-file-image"></i> Local GeoTIFF
+                                    </button>
+                                </div>
+                                <div id="rasterSourceContainer" style="display:none;margin-top:6px;">
+                                    <label for="predictRasterPath" style="font-size:10px;color:#94a3b8;display:block;margin-bottom:3px;">Raster Path (.tif / GeoTIFF):</label>
+                                    <input type="text" id="predictRasterPath" value="D:\Downloads\Data1.tif" placeholder="D:\Downloads\Data1.tif" style="width:100%;font-size:11px;padding:4px 6px;background:#0f172a;border:1px solid #334155;color:#38bdf8;border-radius:3px;">
+                                    <div style="font-size:9.5px;color:#64748b;margin-top:4px;">Native resolution & georeferencing matching ArcGIS Pro.</div>
+                                </div>
+                            </div>
+                            <div class="config-section">
+                                <div class="section-title">📐 RESOLUTION (GSD)</div>
+                                <div class="config-row" style="align-items:center;">
+                                    <label for="predictTargetResolution">Target Res:</label>
+                                    <div style="display:flex;align-items:center;gap:4px;">
+                                        <input type="number" id="predictTargetResolution" value="0.3" min="0.1" max="10.0" step="0.1" style="width:65px;" oninput="updatePredictResolutionBadge()">
+                                        <span style="color:#4ecdc4;font-weight:700;font-size:11px;">m</span>
+                                    </div>
+                                </div>
+                                <div class="config-row" style="margin-top:6px;gap:4px;flex-wrap:wrap;">
+                                    <button class="btn btn-xs" type="button" onclick="setPredictResolution(0.3)" style="background:#1e293b;border:1px solid #334155;color:#38bdf8;padding:2px 6px;border-radius:3px;font-size:10px;">0.3m (High-Res)</button>
+                                    <button class="btn btn-xs" type="button" onclick="setPredictResolution(0.5)" style="background:#1e293b;border:1px solid #334155;color:#94a3b8;padding:2px 6px;border-radius:3px;font-size:10px;">0.5m</button>
+                                    <button class="btn btn-xs" type="button" onclick="setPredictResolution(1.0)" style="background:#1e293b;border:1px solid #334155;color:#94a3b8;padding:2px 6px;border-radius:3px;font-size:10px;">1.0m</button>
+                                    <button class="btn btn-xs" type="button" onclick="setPredictResolution(0)" style="background:#1e293b;border:1px solid #334155;color:#94a3b8;padding:2px 6px;border-radius:3px;font-size:10px;">Auto (Map)</button>
+                                </div>
+                                <div id="predictResHelper" style="font-size:10px;color:#94a3b8;line-height:1.45;margin-top:6px;">
+                                    Auto-captures tiles at <b id="predictResZoomBadge" style="color:#34d399;">Zoom 19 (~0.3m/px)</b> regardless of your screen zoom.
+                                </div>
+                            </div>
+                            <div class="config-section">
+                                <div class="section-title">🔲 TILE SIZE</div>
+                                <div class="config-row" style="align-items:center;">
+                                    <label for="predictTileSize">Tile Size:</label>
+                                    <div style="display:flex;align-items:center;gap:4px;">
+                                        <input type="number" id="predictTileSize" value="256" min="64" max="1024" step="64" style="width:65px;" oninput="updatePredictTileSizeBadge()">
+                                        <span style="color:#4ecdc4;font-weight:700;font-size:11px;">px</span>
+                                    </div>
+                                </div>
+                                <div class="config-row" style="margin-top:6px;gap:4px;flex-wrap:wrap;">
+                                    <button class="btn btn-xs" type="button" onclick="setPredictTileSize(256)" id="btnTile256" style="background:#1e293b;border:1px solid #38bdf8;color:#38bdf8;font-weight:bold;padding:2px 6px;border-radius:3px;font-size:10px;">256px (Standard)</button>
+                                    <button class="btn btn-xs" type="button" onclick="setPredictTileSize(512)" id="btnTile512" style="background:#1e293b;border:1px solid #334155;color:#94a3b8;padding:2px 6px;border-radius:3px;font-size:10px;">512px</button>
+                                    <button class="btn btn-xs" type="button" onclick="setPredictTileSize(128)" id="btnTile128" style="background:#1e293b;border:1px solid #334155;color:#94a3b8;padding:2px 6px;border-radius:3px;font-size:10px;">128px</button>
+                                </div>
+                                <div id="predictTileHelper" style="font-size:10px;color:#94a3b8;line-height:1.45;margin-top:6px;">
+                                    Slices raster into <b id="predictTileSizeBadge" style="color:#34d399;">256×256 px</b> chips (native model resolution).
+                                </div>
+                            </div>
+                            <div class="config-section">
                                 <div class="section-title">⚙️ PREDICTION SETTINGS</div>
-                                <div class="config-row">
-                                    <label>Threshold:</label>
-                                    <input type="range" id="predictThreshold" min="0.05" max="0.95" step="0.05" value="0.5">
-                                    <span id="predictThresholdVal" style="color:#4ecdc4;font-weight:700;min-width:30px;font-size:11px;">0.5</span>
+                                <div class="config-row" style="align-items:center;">
+                                    <label for="predictThreshold">Confidence:</label>
+                                    <input type="range" id="predictThreshold" min="0.05" max="0.95" step="0.05" value="0.35" style="flex:1;" oninput="document.getElementById('predictThresholdVal').textContent=this.value">
+                                    <span id="predictThresholdVal" style="color:#4ecdc4;font-weight:700;min-width:32px;font-size:11px;text-align:right;">0.35</span>
                                 </div>
-                                <div class="config-row">
-                                    <label>Min Area:</label>
-                                    <input type="number" id="predictMinArea" value="20" min="5" max="500" style="width:60px;">
+                                <div class="config-row" style="align-items:center;margin-top:6px;">
+                                    <label for="predictNmsThreshold">NMS Overlap (IoU):</label>
+                                    <div style="display:flex;align-items:center;gap:4px;">
+                                        <input type="number" id="predictNmsThreshold" value="0.20" min="0.05" max="0.60" step="0.05" style="width:65px;">
+                                    </div>
                                 </div>
-                                <details style="margin-top:8px;font-size:11px;color:#cbd5e1;">
-                                    <summary style="cursor:pointer;color:#93c5fd;font-weight:600;">Advanced post-processing</summary>
-                                    <div class="config-row" style="margin-top:8px;">
-                                        <label>Boundary smoothing:</label>
-                                        <input type="range" id="predictSmoothSigma" min="0" max="1.5" step="0.1" value="0.6" style="max-width:100px;">
-                                        <span id="predictSmoothSigmaVal" style="min-width:24px;">0.6</span>
+                                <div class="config-row" style="align-items:center;margin-top:6px;">
+                                    <label for="predictMaxSize">Max Size (m):</label>
+                                    <div style="display:flex;align-items:center;gap:4px;">
+                                        <input type="number" id="predictMaxSize" value="65" min="0" max="1000" step="5" style="width:65px;">
+                                        <span style="color:#4ecdc4;font-weight:700;font-size:11px;">m</span>
+                                        <span style="font-size:9.5px;color:#64748b;">(0=all)</span>
                                     </div>
-                                    <div class="config-row">
-                                        <label>Polygon simplification:</label>
-                                        <input type="number" id="predictSimplifyTolerance" value="0.008" min="0.002" max="0.03" step="0.001" style="width:70px;">
+                                </div>
+                                <div class="config-row" style="align-items:center;margin-top:6px;">
+                                    <label for="predictMinSize">Min Size (m):</label>
+                                    <div style="display:flex;align-items:center;gap:4px;">
+                                        <input type="number" id="predictMinSize" value="2" min="0" max="50" step="1" style="width:65px;">
+                                        <span style="color:#4ecdc4;font-weight:700;font-size:11px;">m</span>
+                                        <span style="font-size:9.5px;color:#64748b;">(0=all)</span>
                                     </div>
-                                    <div class="config-row" style="align-items:center;">
-                                        <label for="predictMorphClose">Merge building parts (Close gaps):</label>
-                                        <input type="checkbox" id="predictMorphClose" checked>
-                                    </div>
-                                    <div style="font-size:10px;color:#94a3b8;line-height:1.45;margin-top:6px;">Connects roof sections and fills internal gaps to output complete, solid building footprints.</div>
-                                </details>
+                                </div>
+                                <div style="font-size:10px;color:#94a3b8;line-height:1.4;margin-top:6px;">
+                                    Max Size 150m allows 85m circular oil tanks & warehouses. Set to 0 to disable size limits.
+                                </div>
                             </div>
                             <div class="config-section">
                                 <div class="section-title">📍 REGION MODE</div>
@@ -805,6 +862,6 @@
         </div>
     </div>
 
-    <script src="/static/app.js?v=dlpk-ws-fix-20261109b"></script>
+    <script src="/static/app.js?v=geoai-model-label-fix-20261117-1"></script>
 </body>
 </html>

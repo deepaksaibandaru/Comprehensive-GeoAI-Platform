@@ -592,10 +592,16 @@ function updateStatusBadge(s) {
 function updateObjectCount() { const c = drawnItems ? drawnItems.getLayers().length : 0; const e = document.getElementById('objectCount'); if (e) e.textContent = c; }
 
 function addLog(type, msg) {
-    const c = document.getElementById('logContent'); const t = new Date().toLocaleTimeString();
-    console.log('[' + type.toUpperCase() + '] ' + msg); if (!c) return;
-    const e = document.createElement('div'); e.className = 'log-entry log-' + type; e.innerHTML = '<span class="time">[' + t + ']</span> ' + msg;
-    c.insertBefore(e, c.firstChild); while (c.children.length > 100) c.removeChild(c.lastChild);
+    const c = document.getElementById('logContent'); const pc = document.getElementById('predictLogContent'); const t = new Date().toLocaleTimeString();
+    console.log('[' + type.toUpperCase() + '] ' + msg);
+    if (c) {
+        const e = document.createElement('div'); e.className = 'log-entry log-' + type; e.innerHTML = '<span class="time">[' + t + ']</span> ' + msg;
+        c.insertBefore(e, c.firstChild); while (c.children.length > 100) c.removeChild(c.lastChild);
+    }
+    if (pc) {
+        const pe = document.createElement('div'); pe.className = 'log-entry log-' + type; pe.innerHTML = '<span class="time">[' + t + ']</span> ' + msg;
+        pc.insertBefore(pe, pc.firstChild); while (pc.children.length > 50) pc.removeChild(pc.lastChild);
+    }
 }
 function clearCurrentLog() { const e = document.getElementById('logContent'); if (e) e.innerHTML = ''; addLog('info', 'Log cleared'); }
 
@@ -650,7 +656,15 @@ async function loadFineTuneModelChoices() {
             const path = m.filepath; if (!path) return;
             const tag = m.is_dlpk ? '.dlpk' : (m.source || 'project');
             const opt = new Option(`${m.model_name} | ${m.model_type || 'unknown'} | ${tag} | epoch ${m.epoch || 0}`, path);
-            opt.dataset.meta = `Architecture: ${m.architecture || m.model_type || 'unknown'}; backbone: ${m.backbone || 'unknown'}; mode: ${m.mode || 'binary'}; tile: ${m.tile_size || 256}; source: ${tag}; label: ${m.label || 'unknown'}`;
+            let displayLabel = m.label || 'unknown';
+            if (displayLabel === 'models' || displayLabel === 'saved' || displayLabel === 'dlpk') {
+                const fg = (m.class_names || []).find(c => {
+                    const s = String(c).toLowerCase().trim();
+                    return s && s !== 'background' && s !== '__background__' && s !== 'nodata' && s !== 'no_data' && s !== '0' && s !== '1';
+                });
+                displayLabel = fg || ((m.model_name || '').toLowerCase().includes('building') ? 'building' : 'object');
+            }
+            opt.dataset.meta = `Architecture: ${m.architecture || m.model_type || 'unknown'}; backbone: ${m.backbone || 'unknown'}; mode: ${m.mode || 'binary'}; tile: ${m.tile_size || 256}; source: ${tag}; label: ${displayLabel}`;
             opt.dataset.modelType = m.model_type || 'unet'; opt.dataset.backbone = m.backbone || 'unet'; opt.dataset.mode = m.mode || 'binary'; opt.dataset.tileSize = String(m.tile_size || 256); opt.dataset.epoch = String(m.epoch || 0);
             select.appendChild(opt);
         });
@@ -1541,10 +1555,10 @@ function loadModels() {
         raw.forEach(m => {
             const filepath = normalizeModelPath(m.filepath || m.path);
             if (!filepath) return;
-            const key = m.model_id || filepath.toLowerCase(); 
+            const key = (m.model_name || m.filename || filepath).toLowerCase(); 
             const row = { ...m, filepath, path: filepath, model_path: filepath, model_name: m.model_name || m.filename || 'model', key: key };
             const previous = byKey.get(key);
-            if (!previous || (row.is_dlpk && !previous.is_dlpk) || (row.extra_info && !previous.extra_info)) byKey.set(key, row);
+            if (!previous || (row.is_dlpk && !previous.is_dlpk) || (row.best_iou > (previous.best_iou || 0))) byKey.set(key, row);
         });
         availableModels = Array.from(byKey.values()).sort((a, b) => {
             const active = (normalizeModelPath(b.filepath) === normalizeModelPath(loadedModelPath)) - (normalizeModelPath(a.filepath) === normalizeModelPath(loadedModelPath));
@@ -1559,10 +1573,13 @@ function loadModels() {
 
             if (newSignature !== currentSignature) {
                 sel.innerHTML = '<option value="">-- Select a model to load --</option>';
+                const seenOpt = new Set();
                 availableModels.forEach(m => {
                     const tag = m.is_dlpk ? '.dlpk' : m.source || 'project';
                     const iou = Number(m.best_iou || 0).toFixed(3);
                     const label = `${m.model_name} (IoU ${iou}) | ${m.model_type || '?'} | ${tag}`;
+                    if (seenOpt.has(label.toLowerCase())) return;
+                    seenOpt.add(label.toLowerCase());
                     const opt = new Option(label, m.filepath);
                     opt.dataset.modelKey = m.key;
                     opt.dataset.modelIndex = String(availableModels.indexOf(m));
@@ -1770,13 +1787,71 @@ function loadModel(path) {
     .then(r => r.json()).then(d => {
         if (!d.success) { const msg = d.error || 'Load failed'; if (es) { es.textContent = '❌ ' + msg; es.style.color = '#f87171'; } if (ps) { ps.textContent = '❌ ' + msg; ps.style.color = '#f87171'; } if (modalBtn) { modalBtn.innerHTML = originalBtnText; modalBtn.disabled = false; } return; }
         loadedModelPath = normalizeModelPath(d.model_path || cleanPath); trainingStats.isModelLoaded = true; trainingStats.bestIou = Number(d.best_iou || 0);
-        if (d.class_names) { classNames = d.class_names; allLabels = [...classNames]; } if (d.backbone) currentBackbone = d.backbone; if (d.mode) currentMode = d.mode;
+        if (d.class_names && d.class_names.length) {
+            classNames = d.class_names;
+            allLabels = [...classNames];
+            const fg = d.class_names.find(c => {
+                const s = String(c).toLowerCase().trim();
+                return s && s !== 'background' && s !== '__background__' && s !== 'nodata' && s !== 'no_data' && s !== '0' && s !== '1';
+            });
+            if (fg && fg !== 'object') {
+                currentLabel = fg;
+            } else if (d.label && d.label !== 'object' && d.label !== 'models' && d.label !== 'saved') {
+                currentLabel = d.label;
+            } else if ((d.model_name || '').toLowerCase().includes('building') || (cleanPath || '').toLowerCase().includes('building')) {
+                currentLabel = 'building';
+            } else if ((d.model_name || '').toLowerCase().includes('car')) {
+                currentLabel = 'car';
+            } else if ((d.model_name || '').toLowerCase().includes('tree') || (d.model_name || '').toLowerCase().includes('palm')) {
+                currentLabel = 'tree';
+            } else if (fg) {
+                currentLabel = fg;
+            }
+        } else if (d.label && d.label !== 'object' && d.label !== 'models' && d.label !== 'saved') {
+            currentLabel = d.label;
+        } else if ((d.model_name || '').toLowerCase().includes('building') || (cleanPath || '').toLowerCase().includes('building')) {
+            currentLabel = 'building';
+        }
+        if (d.backbone) currentBackbone = d.backbone;
+        if (d.mode) currentMode = d.mode;
 
-        if (d.tile_size) { trainingZoom = undefined; const tileInput = document.getElementById('tileSize'); if (tileInput) tileInput.value = d.tile_size; }
+        if (d.tile_size) {
+            trainingZoom = undefined;
+            const tileInput = document.getElementById('tileSize');
+            if (tileInput) tileInput.value = d.tile_size;
+            const pTile = document.getElementById('predictTileSize');
+            if (pTile) pTile.value = d.tile_size;
+            if (typeof updatePredictTileSizeBadge === 'function') updatePredictTileSizeBadge();
+        }
+
+        const isDetector = d.model_type === 'mask_rcnn' || d.model_type === 'rcnn' || d.model_type === 'retinanet' || d.architecture === 'MaskRCNN' || d.architecture === 'FasterRCNN' || d.architecture === 'Mask_rcnn';
+        if (isDetector) {
+            const pThr = document.getElementById('predictThreshold');
+            const pVal = document.getElementById('predictThresholdVal');
+            if (pThr) pThr.value = '0.35';
+            if (pVal) pVal.textContent = '0.35';
+            const pNms = document.getElementById('predictNmsThreshold');
+            if (pNms) pNms.value = '0.20';
+            const pMax = document.getElementById('predictMaxSize');
+            if (pMax) pMax.value = '65';
+            const pMin = document.getElementById('predictMinSize');
+            if (pMin) pMin.value = '2';
+            const pTile = document.getElementById('predictTileSize');
+            if (pTile) {
+                pTile.value = (d.tile_size && d.tile_size > 0) ? String(d.tile_size) : '256';
+                if (typeof updatePredictTileSizeBadge === 'function') updatePredictTileSizeBadge();
+            }
+        }
 
         window.loadedModelMeta = d;
-        const loadedClasses = (d.class_names || []).filter(n => String(n).toLowerCase() !== 'background');
-        const modelSummary = `${d.model_name || cleanPath.split('/').pop()} | ${d.model_type || 'model'}${loadedClasses.length ? ' | classes: ' + loadedClasses.join(', ') : ''}`;
+        const displayName = (!d.model_name || d.model_name.toLowerCase() === 'model') 
+            ? cleanPath.split('/').pop().replace(/\.[^/.]+$/, '') 
+            : d.model_name;
+        const loadedClasses = (d.class_names || []).filter(n => {
+            const s = String(n).toLowerCase().trim();
+            return s && s !== 'background' && s !== '__background__' && s !== 'nodata' && s !== 'no_data';
+        });
+        const modelSummary = `${displayName} | ${d.model_type || 'model'}${loadedClasses.length ? ' | classes: ' + loadedClasses.join(', ') : ''}`;
         if (es) { es.textContent = '✅ Loaded: ' + modelSummary; es.style.color = '#34d399'; } if (ps) { ps.textContent = '✅ Loaded: ' + modelSummary; ps.style.color = '#34d399'; }
         const ep = document.getElementById('evalModelPath'); if (ep) ep.textContent = loadedModelPath.split('/').pop();
         const btn = document.getElementById('predictShpBtn'); if (btn) btn.style.display = 'inline-flex';
@@ -1904,7 +1979,7 @@ function loadModelsForModal() {
             const seenKeys = new Set();
             const rows = rawRows.filter(m => {
                 const filepath = normalizeModelPath(m.filepath || m.path);
-                const key = m.model_id || filepath.toLowerCase();
+                const key = (m.model_name || m.filename || filepath).toLowerCase();
                 if (!key || seenKeys.has(key)) return false;
                 seenKeys.add(key); 
                 m.key = key;
@@ -1926,14 +2001,24 @@ function loadModelsForModal() {
                 sel.innerHTML = '<option value="">-- No trained models found --</option>';
                 return;
             }
+            const seenOptions = new Set();
             rows.forEach(m => {
                 const path = normalizeModelPath(m.filepath || m.path);
                 if (!path) return;
-                const classNames = Array.isArray(m.class_names) ? m.class_names.filter(n => String(n).toLowerCase() !== 'background').join(', ') : '';
+                const classNames = Array.isArray(m.class_names) 
+                    ? m.class_names.filter(n => {
+                        const low = String(n).toLowerCase();
+                        return low !== 'background' && low !== '__background__' && low !== 'nodata';
+                    }).join(', ') 
+                    : '';
                 const iouText = Number(m.best_iou || 0) > 0 ? ` | IoU ${(Number(m.best_iou) * 100).toFixed(1)}%` : '';
                 const sourceText = m.is_dlpk || m.source === 'dlpk' ? 'DLPK' : (m.source || 'native');
                 const optionText = `${m.model_name} | ${m.model_type || 'unknown'} | ${sourceText}${classNames ? ' | ' + classNames : ''}${iouText}`;
                 
+                const optKey = optionText.toLowerCase();
+                if (seenOptions.has(optKey)) return;
+                seenOptions.add(optKey);
+
                 const opt = new Option(optionText, path);
                 opt.dataset.modelKey = m.key;
                 sel.appendChild(opt);
@@ -2001,10 +2086,118 @@ function clearEvaluationMetrics() {
     document.getElementById('evalMetrics').innerHTML = '<p style="color:#64748b;">Run evaluation to see metrics</p>'; updateStatusBadge('idle');
 }
 
+let currentPredictSource = 'basemap';
+
+function setPredictSource(src) {
+    currentPredictSource = src;
+    const btnB = document.getElementById('btnSourceBasemap');
+    const btnR = document.getElementById('btnSourceRaster');
+    const rc = document.getElementById('rasterSourceContainer');
+    if (src === 'raster') {
+        if (btnB) { btnB.style.background = '#1e293b'; btnB.style.borderColor = '#334155'; btnB.style.color = '#94a3b8'; }
+        if (btnR) { btnR.style.background = '#0369a1'; btnR.style.borderColor = '#38bdf8'; btnR.style.color = '#fff'; }
+        if (rc) rc.style.display = 'block';
+        addLog('info', 'Prediction source set to Local GeoTIFF file.');
+    } else {
+        if (btnB) { btnB.style.background = '#0369a1'; btnB.style.borderColor = '#38bdf8'; btnB.style.color = '#fff'; }
+        if (btnR) { btnR.style.background = '#1e293b'; btnR.style.borderColor = '#334155'; btnR.style.color = '#94a3b8'; }
+        if (rc) rc.style.display = 'none';
+        addLog('info', 'Prediction source set to Basemap view.');
+    }
+}
+
+function handlePredictionResponse(d, predictionStartedAt, ps) {
+    lastPredictionGeojson = d.geojson;
+    lastPredictionShp = d.shp_url || d.shp_path;
+    const shpBtn = document.getElementById('predictShpBtn');
+    if (shpBtn) { shpBtn.style.display = lastPredictionShp ? 'block' : 'none'; }
+    const count = d.geojson ? d.geojson.features.length : 0;
+    const objEl = document.getElementById('predictObjectCount');
+    if (objEl) objEl.textContent = count;
+    if (ps) { ps.textContent = `✅ ${count} objects`; ps.style.color = '#34d399'; }
+    const elapsedSeconds = Number.isFinite(Number(d.duration_seconds)) ? Number(d.duration_seconds) : Math.max(0, (Date.now() - predictionStartedAt) / 1000);
+    addLog('success', `Prediction completed in ${elapsedSeconds.toFixed(1)}s: ${count} objects detected`);
+    if (predictResultLayer) { mapPredict.removeLayer(predictResultLayer); predictResultLayer = null; }
+    if (count > 0 && d.geojson) {
+        predictResultLayer = L.geoJSON(d.geojson, {
+            style: function(f) {
+                const c = Number(f.properties?.confidence || 0.5);
+                return { color: '#22c55e', weight: 2, opacity: 0.95, fillColor: '#22c55e', fillOpacity: 0.15 + c * 0.35 };
+            },
+            onEachFeature: function(f, layer) {
+                const p = f.properties || {}, conf = ((p.confidence || 0) * 100).toFixed(1), area = Math.round(p.area_px || p.area || 0), cls = p.class_name || 'object', iid = p.instance_id !== undefined ? p.instance_id : '—';
+                layer.bindPopup(`<div style="font-family:'Segoe UI',monospace;font-size:12px;color:#e2e8f0;background:#0f172a;padding:6px 10px;border-radius:4px;"><div style="font-weight:700;color:#22c55e;margin-bottom:2px;">${cls}</div><div>Instance: <b>#${iid}</b></div><div>Confidence: <b style="color:#34d399;">${conf}%</b></div><div>Area: <b>${area}</b> px</div></div>`);
+                layer.on('mouseover', function() { this.openPopup(); });
+            }
+        }).addTo(mapPredict);
+        try {
+            const b = predictResultLayer.getBounds();
+            if (b.isValid()) mapPredict.fitBounds(b, {padding:[40,40]});
+        } catch(e) {}
+    } else if (d.raster_bounds) {
+        try {
+            mapPredict.fitBounds([[d.raster_bounds.south, d.raster_bounds.west], [d.raster_bounds.north, d.raster_bounds.east]], {padding:[40,40]});
+        } catch(e) {}
+    }
+    renderPredictResults(d.geojson, d);
+}
+
 function runPrediction() {
     const predictionStartedAt = Date.now();
-    if (!loadedModelPath) { if (availableModels.length > 0) { loadModel(availableModels[0].path); } else { addLog('warning', 'Load a model first'); } return; }
+    if (!loadedModelPath) {
+        if (availableModels.length > 0) {
+            addLog('info', 'No model loaded yet. Auto-loading ' + (availableModels[0].name || availableModels[0].path.split('/').pop()) + '...');
+            loadModel(availableModels[0].path);
+        } else {
+            addLog('warning', 'Please load a model first using the Load Model button.');
+            openModelSelectModal();
+        }
+        return;
+    }
     if (!mapPredict) { addLog('error','Predict map not ready'); return; }
+
+    const thr = parseFloat(document.getElementById('predictThreshold')?.value || '0.35');
+    const nmsThr = parseFloat(document.getElementById('predictNmsThreshold')?.value || '0.20');
+    const maxSz = parseFloat(document.getElementById('predictMaxSize')?.value || '65');
+    const minSz = parseFloat(document.getElementById('predictMinSize')?.value || '2');
+    const ps = document.getElementById('predictStatus'); if (ps) { ps.textContent = '⏳ Predicting...'; ps.style.color = '#fbbf24'; }
+    const curZoom = mapPredict.getZoom(), aoiBoundsPayload = (aoiBounds && aoiBounds.isValid()) ? { north: aoiBounds.getNorth(), south: aoiBounds.getSouth(), east: aoiBounds.getEast(), west: aoiBounds.getWest() } : null;
+
+    const targetTileSizeVal = parseInt(document.getElementById('predictTileSize')?.value || '256', 10);
+    const targetTileSize = (targetTileSizeVal > 0 && Number.isFinite(targetTileSizeVal)) ? targetTileSizeVal : 256;
+
+    if (currentPredictSource === 'raster') {
+        const rasterPath = document.getElementById('predictRasterPath')?.value?.trim();
+        if (!rasterPath) {
+            addLog('error', 'Please enter a valid raster file path (.tif)');
+            if (ps) { ps.textContent = '❌ No raster path'; ps.style.color = '#f87171'; }
+            return;
+        }
+        addLog('info', `Running native GeoTIFF prediction on ${rasterPath.split(/[\/\\]/).pop()}...`);
+        fetch('/predict', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                model_path: loadedModelPath,
+                raster_path: rasterPath,
+                threshold: thr,
+                nms_threshold: nmsThr,
+                max_size_m: maxSz,
+                min_size_m: minSz,
+                tile_size: targetTileSize,
+                label: currentLabel,
+                backbone: currentBackbone,
+                aoi_bounds: aoiBoundsPayload
+            })
+        })
+        .then(r => r.json())
+        .then(d => {
+            if (!d.success) { addLog('error','Predict failed: ' + (d.error||'')); if (ps) { ps.textContent = '❌ Error'; ps.style.color = '#f87171'; } return; }
+            handlePredictionResponse(d, predictionStartedAt, ps);
+        })
+        .catch(e => { addLog('error','Error: ' + e.message); if (ps) { ps.textContent = '❌ ' + e.message; ps.style.color = '#f87171'; } });
+        return;
+    }
 
     let bounds;
     const modelMeta = window.loadedModelMeta || {};
@@ -2013,37 +2206,123 @@ function runPrediction() {
     const impliedZoom = modelTileSize > 256 ? 18 : 17;
     if (aoiBounds && aoiBounds.isValid()) { bounds = aoiBounds; } else { const current = mapPredict.getZoom(); if (modelZoom && current !== modelZoom) { mapPredict.setZoom(modelZoom, {animate:false}); } else if (modelTileSize > 256 && current < impliedZoom) { mapPredict.setZoom(impliedZoom, {animate:false}); } bounds = mapPredict.getBounds(); }
 
-    const thr = parseFloat(document.getElementById('predictThreshold')?.value || '0.5'), minA = parseInt(document.getElementById('predictMinArea')?.value || '20', 10), smoothSigma = parseFloat(document.getElementById('predictSmoothSigma')?.value || '0.6'), simplifyTolerance = parseFloat(document.getElementById('predictSimplifyTolerance')?.value || '0.008'), morphClose = !!document.getElementById('predictMorphClose')?.checked;
-    const ps = document.getElementById('predictStatus'); if (ps) { ps.textContent = '⏳ Predicting...'; ps.style.color = '#fbbf24'; }
-    const curZoom = mapPredict.getZoom(), aoiBoundsPayload = (aoiBounds && aoiBounds.isValid()) ? { north: aoiBounds.getNorth(), south: aoiBounds.getSouth(), east: aoiBounds.getEast(), west: aoiBounds.getWest() } : null;
+    const targetResVal = parseFloat(document.getElementById('predictTargetResolution')?.value || '0.3');
+    const targetRes = (targetResVal > 0 && Number.isFinite(targetResVal)) ? targetResVal : null;
+
+    let captureZoom = curZoom;
+    if (targetRes && bounds) {
+        const centerLat = (bounds.getNorth() + bounds.getSouth()) / 2.0;
+        const cosLat = Math.max(0.1, Math.cos(centerLat * Math.PI / 180.0));
+        captureZoom = Math.max(15, Math.min(20, Math.round(Math.log2((156543.03392 * cosLat) / targetRes))));
+    }
 
     let detScale = 1.0;
-    if (curZoom === 17) detScale = 2.0;
-    if (curZoom === 18) detScale = 1.5;
-    if (curZoom === 19) detScale = 1.0;
+    if (captureZoom === 17) detScale = 2.0;
+    if (captureZoom === 18) detScale = 1.5;
+    if (captureZoom >= 19) detScale = 1.0;
 
-    fetch('/api/map/capture', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ bounds: {north: bounds.getNorth(), south: bounds.getSouth(), east: bounds.getEast(), west: bounds.getWest()}, zoom: curZoom, service_id: 'satellite', project_id: currentProjectId }) })
-    .then(r => r.json()).then(cd => { if (!cd.success) throw new Error(cd.error || 'capture failed'); return fetch('/predict', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ model_path: loadedModelPath, image_path: cd.filepath, bounds: cd.bounds, threshold: thr, min_area: minA, label: currentLabel, backbone: currentBackbone, zoom: curZoom, smooth_sigma: smoothSigma, simplify_tolerance: simplifyTolerance, morph_close: morphClose, aoi_bounds: aoiBoundsPayload, detection_scale: detScale }) }); })
+    fetch('/api/map/capture', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ bounds: {north: bounds.getNorth(), south: bounds.getSouth(), east: bounds.getEast(), west: bounds.getWest()}, zoom: captureZoom, target_resolution: targetRes, tile_size: targetTileSize, service_id: 'satellite', project_id: currentProjectId }) })
+    .then(r => r.json()).then(cd => {
+        if (!cd.success) throw new Error(cd.error || 'capture failed');
+        if (cd.bounds?.gsd && cd.bounds.gsd > 0.8) {
+            addLog('warning', `Resolution is coarse (${cd.bounds.gsd}m/px). For pinpoint buildings, zoom in to a focused area.`);
+        }
+        return fetch('/predict', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ model_path: loadedModelPath, image_path: cd.filepath, bounds: cd.bounds, threshold: thr, nms_threshold: nmsThr, max_size_m: maxSz, min_size_m: minSz, label: currentLabel, backbone: currentBackbone, zoom: captureZoom, aoi_bounds: aoiBoundsPayload, detection_scale: detScale, tile_size: targetTileSize, target_resolution: targetRes }) });
+    })
     .then(r => r.json()).then(d => {
         if (!d.success) { addLog('error','Predict failed: ' + (d.error||'')); if (ps) { ps.textContent = '❌ Error'; ps.style.color = '#f87171'; } return; }
-        lastPredictionGeojson = d.geojson; lastPredictionShp = d.shp_url || d.shp_path;
-        const shpBtn = document.getElementById('predictShpBtn');
-        if (shpBtn) { shpBtn.style.display = lastPredictionShp ? 'block' : 'none'; }
-        const count = d.geojson ? d.geojson.features.length : 0; document.getElementById('predictObjectCount').textContent = count;
-        if (ps) { ps.textContent = `✅ ${count} objects`; ps.style.color = '#34d399'; }
-        const elapsedSeconds = Number.isFinite(Number(d.duration_seconds)) ? Number(d.duration_seconds) : Math.max(0, (Date.now() - predictionStartedAt) / 1000);
-        addLog('success', `Prediction completed in ${elapsedSeconds.toFixed(1)}s: ${count} objects`);
-        if (predictResultLayer) { mapPredict.removeLayer(predictResultLayer); predictResultLayer = null; }
-        if (count > 0 && d.geojson) { predictResultLayer = L.geoJSON(d.geojson, { style: function(f) { const c = Number(f.properties?.confidence || 0.5); return { color: '#22c55e', weight: 2, opacity: 0.95, fillColor: '#22c55e', fillOpacity: 0.15 + c * 0.35 }; }, onEachFeature: function(f, layer) { const p = f.properties || {}, conf = ((p.confidence || 0) * 100).toFixed(1), area = Math.round(p.area || 0), cls = p.class_name || 'object', iid = p.instance_id !== undefined ? p.instance_id : '—'; layer.bindPopup(`<div style="font-family:'Segoe UI',monospace;font-size:12px;color:#e2e8f0;background:#0f172a;padding:6px 10px;border-radius:4px;"><div style="font-weight:700;color:#22c55e;margin-bottom:2px;">${cls}</div><div>Instance: <b>#${iid}</b></div><div>Confidence: <b style="color:#34d399;">${conf}%</b></div><div>Area: <b>${area}</b> px</div></div>`); layer.on('mouseover', function() { this.openPopup(); }); } }).addTo(mapPredict); try { const b = predictResultLayer.getBounds(); if (b.isValid()) mapPredict.fitBounds(b, {padding:[40,40]}); } catch(e) {} }
-        renderPredictResults(d.geojson);
+        handlePredictionResponse(d, predictionStartedAt, ps);
     }).catch(e => { addLog('error','Error: ' + e.message); if (ps) { ps.textContent = '❌ ' + e.message; ps.style.color = '#f87171'; } });
 }
 
-(function wirePredictPostprocessControls() { const slider = document.getElementById('predictSmoothSigma'), value = document.getElementById('predictSmoothSigmaVal'); if (slider && value) slider.addEventListener('input', () => { value.textContent = Number(slider.value).toFixed(1); }); })();
+function setPredictResolution(val) {
+    const input = document.getElementById('predictTargetResolution');
+    if (input) {
+        input.value = val > 0 ? val : '';
+        updatePredictResolutionBadge();
+    }
+}
 
-function renderPredictResults(geojson) {
+function updatePredictResolutionBadge() {
+    const input = document.getElementById('predictTargetResolution');
+    const badge = document.getElementById('predictResZoomBadge');
+    if (!badge) return;
+    const val = parseFloat(input?.value || '0');
+    if (val <= 0 || isNaN(val)) {
+        badge.textContent = 'Auto (Current Map Zoom)';
+        badge.style.color = '#94a3b8';
+        return;
+    }
+    const lat = (mapPredict && typeof mapPredict.getCenter === 'function') ? mapPredict.getCenter().lat : 26.0;
+    const cosLat = Math.max(0.1, Math.cos(lat * Math.PI / 180.0));
+    const calcZ = Math.max(15, Math.min(20, Math.round(Math.log2((156543.03392 * cosLat) / val))));
+    badge.textContent = `Zoom ${calcZ} (~${val.toFixed(2)}m/px)`;
+    badge.style.color = '#34d399';
+}
+
+function setPredictTileSize(val) {
+    const input = document.getElementById('predictTileSize');
+    if (input) {
+        input.value = val > 0 ? val : 512;
+        updatePredictTileSizeBadge();
+    }
+}
+
+function updatePredictTileSizeBadge() {
+    const input = document.getElementById('predictTileSize');
+    const badge = document.getElementById('predictTileSizeBadge');
+    if (!badge) return;
+    const val = parseInt(input?.value || '512', 10);
+    badge.textContent = `${val}×${val} px`;
+    ['btnTile128', 'btnTile256', 'btnTile512'].forEach(id => {
+        const btn = document.getElementById(id);
+        if (btn) {
+            const btnVal = id === 'btnTile128' ? 128 : (id === 'btnTile256' ? 256 : 512);
+            if (val === btnVal) {
+                btn.style.borderColor = '#38bdf8';
+                btn.style.color = '#38bdf8';
+            } else {
+                btn.style.borderColor = '#334155';
+                btn.style.color = '#94a3b8';
+            }
+        }
+    });
+}
+
+function applySuggestedThreshold(conf) {
+    const targetThr = Math.max(0.05, Math.floor(conf * 20) / 20);
+    const slider = document.getElementById('predictThreshold');
+    const disp = document.getElementById('predictThresholdVal');
+    const disp2 = document.getElementById('predictThresholdDisplay');
+    if (slider) slider.value = targetThr;
+    if (disp) disp.textContent = targetThr.toFixed(2);
+    if (disp2) disp2.textContent = targetThr.toFixed(2);
+    runPrediction();
+}
+
+(function wirePredictPostprocessControls() {})();
+
+function renderPredictResults(geojson, meta) {
     const panel = document.getElementById('predictResults'); if (!panel) return;
-    if (!geojson || !geojson.features || geojson.features.length === 0) { panel.innerHTML = '<p style="color:#64748b;font-size:11px;">No objects detected</p>'; window.__lastPredFeatures = null; return; }
+    if (!geojson || !geojson.features || geojson.features.length === 0) {
+        const maxConf = (meta && meta.max_confidence) ? Number(meta.max_confidence) : 0;
+        const candCount = (meta && meta.raw_candidate_count) ? Number(meta.raw_candidate_count) : 0;
+        const curThr = parseFloat(document.getElementById('predictThreshold')?.value || '0.5');
+        if (maxConf > 0 && maxConf < curThr) {
+            const suggested = Math.max(0.05, Math.floor(maxConf * 20) / 20);
+            panel.innerHTML = `<div style="font-size:11px;color:#cbd5e1;line-height:1.5;padding:8px;background:#1e293b;border-radius:4px;border:1px solid #334155;">
+                <div style="color:#fbbf24;font-weight:700;margin-bottom:4px;">⚠️ No objects &ge; ${(curThr*100).toFixed(0)}%</div>
+                <div style="font-size:10px;color:#94a3b8;">Detector found <b>${candCount}</b> candidates, highest confidence is <b style="color:#38bdf8;">${(maxConf*100).toFixed(1)}%</b>.</div>
+                <button class="btn btn-xs btn-info" style="margin-top:8px;width:100%;font-size:10px;padding:4px 6px;" onclick="applySuggestedThreshold(${maxConf})">
+                    <i class="fas fa-sliders-h"></i> Lower Threshold to ${suggested.toFixed(2)} & Re-Predict
+                </button>
+            </div>`;
+        } else {
+            panel.innerHTML = '<p style="color:#64748b;font-size:11px;">No objects detected</p>';
+        }
+        window.__lastPredFeatures = null;
+        return;
+    }
     const feats = [...geojson.features].sort((a, b) => (b.properties?.confidence || 0) - (a.properties?.confidence || 0));
     let html = `<div style="font-size:10px;color:#64748b;margin-bottom:6px;padding-bottom:4px;border-bottom:1px solid #1e293b;">${feats.length} object${feats.length === 1 ? '' : 's'} detected</div>`;
     feats.forEach((f, i) => { const p = f.properties || {}, conf = ((p.confidence || 0) * 100).toFixed(1), area = Math.round(p.area || 0), cls = p.class_name || 'default', confColor = conf >= 70 ? '#34d399' : conf >= 50 ? '#fbbf24' : '#f87171'; html += `<div class="predict-result-row" style="display:flex;align-items:center;gap:6px;padding:5px 6px;border-bottom:1px solid #1e293b;font-size:10px;color:#e2e8f0;cursor:pointer;transition:background 0.15s;" onmouseover="this.style.background='#1e293b'" onmouseout="this.style.background='transparent'" onclick="zoomToPrediction(${i})"><span style="display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;border-radius:3px;background:#1e293b;color:#4ecdc4;font-size:9px;font-weight:700;">${i + 1}</span><span style="flex:1;color:#94a3b8;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${cls}</span><span style="color:${confColor};font-weight:700;">${conf}%</span><span style="color:#64748b;font-size:9px;">${area}px</span></div>`; });
@@ -2101,7 +2380,7 @@ function downloadGeoJSON() {
 function exportGeoJSON() { downloadGeoJSON(); }
 function exportShapefile() { downloadShapefile(); }
 
-function runBatchPredict() { if (!loadedModelPath) { addLog('warning', 'Load a model first'); return; } const folder = prompt("Enter folder path with images:"); if (!folder) return; const thr = parseFloat(document.getElementById('predictThreshold')?.value || '0.5'), minA = parseInt(document.getElementById('predictMinArea')?.value || '20', 10); const ps = document.getElementById('predictStatus'); if (ps) { ps.textContent = '⏳ Batch predicting...'; ps.style.color = '#fbbf24'; } fetch('/api/predict_folder', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ folder, label: currentLabel, model_path: loadedModelPath, threshold: thr, min_area: minA }) }).then(r => r.json()).then(d => { if (!d.success) { addLog('error', 'Batch failed: ' + (d.error || '')); if (ps) { ps.textContent = '❌ ' + (d.error || 'failed'); ps.style.color = '#f87171'; } return; } addLog('success', `Batch: ${d.n_files} files → ${d.total_objects} objects`); if (ps) { ps.textContent = `✅ ${d.total_objects} objects across ${d.n_files} files`; ps.style.color = '#34d399'; } document.getElementById('predictObjectCount').textContent = d.total_objects; }).catch(e => { addLog('error', 'Batch error: ' + e.message); if (ps) { ps.textContent = '❌ ' + e.message; ps.style.color = '#f87171'; } }); }
+function runBatchPredict() { if (!loadedModelPath) { addLog('warning', 'Load a model first'); return; } const folder = prompt("Enter folder path with images:"); if (!folder) return; const thr = parseFloat(document.getElementById('predictThreshold')?.value || '0.5'); const ps = document.getElementById('predictStatus'); if (ps) { ps.textContent = '⏳ Batch predicting...'; ps.style.color = '#fbbf24'; } fetch('/api/predict_folder', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ folder, label: currentLabel, model_path: loadedModelPath, threshold: thr }) }).then(r => r.json()).then(d => { if (!d.success) { addLog('error', 'Batch failed: ' + (d.error || '')); if (ps) { ps.textContent = '❌ ' + (d.error || 'failed'); ps.style.color = '#f87171'; } return; } addLog('success', `Batch: ${d.n_files} files → ${d.total_objects} objects`); if (ps) { ps.textContent = `✅ ${d.total_objects} objects across ${d.n_files} files`; ps.style.color = '#34d399'; } document.getElementById('predictObjectCount').textContent = d.total_objects; }).catch(e => { addLog('error', 'Batch error: ' + e.message); if (ps) { ps.textContent = '❌ ' + e.message; ps.style.color = '#f87171'; } }); }
 
 function refreshPublicDatasets() { const tbody = document.getElementById('publicDatasetsBody'); if (!tbody) return; tbody.innerHTML = ''; let idx = 1; for (const [key, s] of Object.entries(MAP_SERVICES)) { tbody.innerHTML += `<tr><td>${idx}</td><td><strong style="color:#e2e8f0;">${s.name}</strong><span style="font-size:9px;padding:1px 5px;border-radius:3px;margin-left:6px;background:${s.internal ? '#064e3b' : '#7f1d1d'};color:${s.internal ? '#6ee7b7' : '#fecaca'};">${s.internal ? 'IGA' : 'PUBLIC'}</span></td><td>${s.resolution || '—'}</td><td>${s.type || 'Raster'}</td><td>Z ${s.max_zoom || '—'}</td><td style="font-size:10px;">${s.attribution || '—'}</td><td><button class="btn btn-info btn-xs" onclick="useDataset('${key}')"><i class="fas fa-external-link-alt"></i></button></td></tr>`; idx++; } document.getElementById('publicDatasetsCount').textContent = Object.keys(MAP_SERVICES).length + ' public datasets'; document.getElementById('publicBadge').textContent = Object.keys(MAP_SERVICES).length; }
 function useDataset(key) { const m = document.getElementById('mapServiceSelect'); if (m) m.value = key; changeMapService(); switchWorkflow('train'); }
@@ -2109,4 +2388,4 @@ function loadUploadedDatasets() { fetch('/api/uploaded_datasets').then(r => r.js
 function deleteDataset(sid) { if (!confirm('Delete session?')) return; fetch('/api/uploaded_datasets/' + sid, {method:'DELETE'}).then(r => r.json()).then(d => { if (d.success) loadUploadedDatasets(); }); }
 
 window.toggleDrawAoiMode = toggleDrawAoiMode; window.handleAoiCreated = handleAoiCreated; window.zoomToAoi = zoomToAoi; window.toggleEditAoi = toggleEditAoi; window.deleteUserAoi = deleteUserAoi; window.clearAllUserAois = clearAllUserAois; window.toggleClusterOptions = toggleClusterOptions; window.executeClusterAOIs = executeClusterAOIs;
-window.selectProject = selectProject; window.deleteProject = deleteProject; window.showCreateProject = showCreateProject; window.closeCreateProject = closeCreateProject; window.createProjectFromNewModal = createProjectFromNewModal; window.createNewLabel = createNewLabel; window.selectLabel = selectLabel; window.startTraining = startTraining; window.stopTraining = stopTraining; window.runOverfitTest = runOverfitTest; window.loadModel = loadModel; window.deleteModel = deleteModel; window.showLoadModelDialog = showLoadModelDialog; window.evaluateModel = evaluateModel; window.clearEvaluationMetrics = clearEvaluationMetrics; window.drawEvaluationPolygons = drawEvaluationPolygons; window.runPrediction = runPrediction; window.runBatchPredict = runBatchPredict; window.clearPrediction = clearPrediction; window.downloadShapefile = downloadShapefile; window.downloadGeoJSON = downloadGeoJSON; window.exportGeoJSON = exportGeoJSON; window.exportShapefile = exportShapefile; window.mergeAllLabels = mergeAllLabels; window.downloadFile = downloadFile; window.saveAnnotations = saveAnnotations; window.loadAnnotations = loadAnnotations; window.clearAll = clearAll; window.deleteSelectedShape = deleteSelectedShape; window.previewLabelClusterAOIs = previewLabelClusterAOIs; window.clearLabelClusterAOIs = clearLabelClusterAOIs; window.setAOI = setAOI; window.captureMap = captureMap; window.lockTrainingScale = lockTrainingScale; window.buildDataset = buildDataset; window.saveTrainedModel = saveTrainedModel; window.openFolderBrowser = openFolderBrowser; window.showDashboard = showDashboard; window.showProjects = showProjects; window.showModels = showModels; window.showPublicDatasets = showPublicDatasets; window.showUploadedDatasets = showUploadedDatasets; window.showPurchasedDatasets = showPurchasedDatasets; window.showDownload = showDownload; window.switchWorkflow = switchWorkflow; window.searchLocation = searchLocation; window.searchPredictLocation = searchPredictLocation; window.searchEvalLocation = searchEvalLocation; window.refreshPublicDatasets = refreshPublicDatasets; window.refreshAnnotationModalList = refreshAnnotationModalList; window.loadUploadedDatasets = loadUploadedDatasets; window.loadProjects = loadProjects; window.loadModels = loadModels; window.loadLabels = loadLabels; window.renderPredictResults = renderPredictResults; window.zoomToPrediction = zoomToPrediction; window.getCurrentModelType = getCurrentModelType; window.isMaskRCNNModel = isMaskRCNNModel; window.toggleAdvanced = toggleAdvanced; window.getAdvancedTrainingSettings = getAdvancedTrainingSettings; window.loadModelFromModalDropdown = loadModelFromModalDropdown; window.refreshEvaluateModelStatus = refreshEvaluateModelStatus; window.layerToPolygonRing = layerToPolygonRing; window.layerToPolygonFeature = layerToPolygonFeature; window.ringToPolygonGeometry = ringToPolygonGeometry; window.featureToPolygonRing = featureToPolygonRing; window.importDlpk = importDlpk; window.exportDlpk = exportDlpk; window.downloadModel = downloadModel; window.loadFineTuneModelChoices = loadFineTuneModelChoices; window.selectFineTuneExistingModel = selectFineTuneExistingModel; window.importFineTuneModel = importFineTuneModel; window.startTrainingOrFineTune = startTrainingOrFineTune; window.startFineTune = startFineTune; window.exportModelWithFormat = exportModelWithFormat;
+window.selectProject = selectProject; window.deleteProject = deleteProject; window.showCreateProject = showCreateProject; window.closeCreateProject = closeCreateProject; window.createProjectFromNewModal = createProjectFromNewModal; window.createNewLabel = createNewLabel; window.selectLabel = selectLabel; window.startTraining = startTraining; window.stopTraining = stopTraining; window.runOverfitTest = runOverfitTest; window.loadModel = loadModel; window.deleteModel = deleteModel; window.showLoadModelDialog = showLoadModelDialog; window.evaluateModel = evaluateModel; window.clearEvaluationMetrics = clearEvaluationMetrics; window.drawEvaluationPolygons = drawEvaluationPolygons; window.runPrediction = runPrediction; window.runBatchPredict = runBatchPredict; window.clearPrediction = clearPrediction; window.downloadShapefile = downloadShapefile; window.downloadGeoJSON = downloadGeoJSON; window.exportGeoJSON = exportGeoJSON; window.exportShapefile = exportShapefile; window.mergeAllLabels = mergeAllLabels; window.downloadFile = downloadFile; window.saveAnnotations = saveAnnotations; window.loadAnnotations = loadAnnotations; window.clearAll = clearAll; window.deleteSelectedShape = deleteSelectedShape; window.previewLabelClusterAOIs = previewLabelClusterAOIs; window.clearLabelClusterAOIs = clearLabelClusterAOIs; window.setAOI = setAOI; window.captureMap = captureMap; window.lockTrainingScale = lockTrainingScale; window.buildDataset = buildDataset; window.saveTrainedModel = saveTrainedModel; window.openFolderBrowser = openFolderBrowser; window.showDashboard = showDashboard; window.showProjects = showProjects; window.showModels = showModels; window.showPublicDatasets = showPublicDatasets; window.showUploadedDatasets = showUploadedDatasets; window.showPurchasedDatasets = showPurchasedDatasets; window.showDownload = showDownload; window.switchWorkflow = switchWorkflow; window.searchLocation = searchLocation; window.searchPredictLocation = searchPredictLocation; window.searchEvalLocation = searchEvalLocation; window.refreshPublicDatasets = refreshPublicDatasets; window.refreshAnnotationModalList = refreshAnnotationModalList; window.loadUploadedDatasets = loadUploadedDatasets; window.loadProjects = loadProjects; window.loadModels = loadModels; window.loadLabels = loadLabels; window.renderPredictResults = renderPredictResults; window.zoomToPrediction = zoomToPrediction; window.getCurrentModelType = getCurrentModelType; window.isMaskRCNNModel = isMaskRCNNModel; window.toggleAdvanced = toggleAdvanced; window.getAdvancedTrainingSettings = getAdvancedTrainingSettings; window.loadModelFromModalDropdown = loadModelFromModalDropdown; window.refreshEvaluateModelStatus = refreshEvaluateModelStatus; window.layerToPolygonRing = layerToPolygonRing; window.layerToPolygonFeature = layerToPolygonFeature; window.ringToPolygonGeometry = ringToPolygonGeometry; window.featureToPolygonRing = featureToPolygonRing; window.importDlpk = importDlpk; window.exportDlpk = exportDlpk; window.downloadModel = downloadModel; window.loadFineTuneModelChoices = loadFineTuneModelChoices; window.selectFineTuneExistingModel = selectFineTuneExistingModel; window.importFineTuneModel = importFineTuneModel; window.startTrainingOrFineTune = startTrainingOrFineTune; window.startFineTune = startFineTune; window.exportModelWithFormat = exportModelWithFormat; window.setPredictResolution = setPredictResolution; window.updatePredictResolutionBadge = updatePredictResolutionBadge; window.applySuggestedThreshold = applySuggestedThreshold; window.setPredictTileSize = setPredictTileSize; window.updatePredictTileSizeBadge = updatePredictTileSizeBadge; window.setPredictSource = setPredictSource;

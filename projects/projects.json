@@ -1,5 +1,40 @@
 [
   {
+    "id": "proj_d7e3e4a9",
+    "name": "USA Buildings data",
+    "created": "11/18/2026, 11:37:09 AM",
+    "updated": "11/18/2026, 11:37:09 AM",
+    "labels": [
+      "background",
+      "buildings_new1811"
+    ],
+    "annotations_count": 6523,
+    "chips_count": 0,
+    "has_model": false,
+    "model_path": null,
+    "evaluation_score": null,
+    "image_path": null,
+    "annotation_path": "annotations/buildings_new1811.geojson",
+    "dataset_dir": "labels/buildings_new1811/dataset",
+    "task_type": "Instance Segmentation",
+    "dataset_type": "Optical Satellite Imagery",
+    "model_type": "Mask R-CNN",
+    "model_type_key": "mask_rcnn",
+    "feature_extractor": "resnet50",
+    "fuse_at": "bottleneck",
+    "support_weight": 0.3,
+    "description": "USA Building Footprint fine-tuning dataset with 6,523 single building footprints",
+    "mode": "binary",
+    "crs": "EPSG:4326",
+    "bounds": {
+      "west": 50.18679,
+      "south": 24.10572,
+      "east": 56.63011,
+      "north": 26.19277,
+      "crs": "EPSG:4326"
+    }
+  },
+  {
     "id": "proj_bd_whole",
     "name": "bd_whole",
     "created": "11/12/2026, 08:30:00 PM",
