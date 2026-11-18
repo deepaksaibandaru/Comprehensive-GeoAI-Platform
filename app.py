@@ -3431,7 +3431,7 @@ async def predict_compat(data: Dict):
         if is_detector:
             detector_tile_size = int(data.get("tile_size") or meta.get("tile_size") or meta.get("target_size") or 256)
             if detector_tile_size <= 0: detector_tile_size = 256
-            detector_overlap = max(64, int(detector_tile_size * 0.25))
+            detector_overlap = max(80, int(detector_tile_size * 0.30))
             detector_stride = max(1, detector_tile_size - detector_overlap)
 
             # Calibrated threshold directly from user UI input (no hardcoded override)
@@ -3510,6 +3510,12 @@ async def predict_compat(data: Dict):
                             if max_size_m > 0 and (w_m > max_size_m or h_m > max_size_m):
                                 continue
 
+                            touch_left = is_left_internal and (b[0] <= 3)
+                            touch_right = is_right_internal and (b[2] >= detector_tile_size - 3)
+                            touch_top = is_top_internal and (b[1] <= 3)
+                            touch_bottom = is_bottom_internal and (b[3] >= detector_tile_size - 3)
+                            touches_seam = touch_left or touch_right or touch_top or touch_bottom
+
                             lbl = int(c_labels[i]) if (c_labels is not None and i < len(c_labels)) else 1
                             gx1, gy1, gx2, gy2 = float(b[0] + ox), float(b[1] + oy), float(b[2] + ox), float(b[3] + oy)
 
@@ -3550,16 +3556,58 @@ async def predict_compat(data: Dict):
                                 "lbl": lbl,
                                 "c_name": c_name,
                                 "poly": poly_shp,
+                                "touches_seam": touches_seam,
                                 "w_m": w_m, "h_m": h_m
                             })
 
-            # Pure Standard NMS (Non-Maximum Suppression) on Raw Model Predictions
-            # Sort detections by confidence score descending
-            raw_items.sort(key=lambda x: x["score"], reverse=True)
+            # Complementary seam stitching for structures cut across tile boundaries
+            suppressed_seam_halves = set()
+            for i in range(len(raw_items)):
+                if i in suppressed_seam_halves: continue
+                cur = raw_items[i]
+                if not cur["touches_seam"]: continue
+
+                for j in range(i + 1, len(raw_items)):
+                    if j in suppressed_seam_halves: continue
+                    oth = raw_items[j]
+                    if not oth["touches_seam"]: continue
+
+                    # They must meet or touch along the seam line
+                    if not cur["poly"].buffer(2.0).intersects(oth["poly"].buffer(2.0)):
+                        continue
+
+                    try:
+                        u = cur["poly"].union(oth["poly"])
+                        if u.geom_type == "MultiPolygon":
+                            u = unary_union([cur["poly"].buffer(1.5), oth["poly"].buffer(1.5)]).buffer(-1.5)
+
+                        if u.is_valid and not u.is_empty and u.geom_type == "Polygon":
+                            ub = u.bounds
+                            uw_m = (ub[2] - ub[0]) * m_per_px
+                            uh_m = (ub[3] - ub[1]) * m_per_px
+                            if (max_size_m <= 0 or (uw_m <= max_size_m and uh_m <= max_size_m)) and u.area <= (cur["poly"].area + oth["poly"].area + 30):
+                                cur["poly"] = u
+                                cur["score"] = max(cur["score"], oth["score"])
+                                cur["b_px"] = [
+                                    min(cur["b_px"][0], oth["b_px"][0]),
+                                    min(cur["b_px"][1], oth["b_px"][1]),
+                                    max(cur["b_px"][2], oth["b_px"][2]),
+                                    max(cur["b_px"][3], oth["b_px"][3])
+                                ]
+                                cur["touches_seam"] = False  # Healed and complete!
+                                suppressed_seam_halves.add(j)
+                                break
+                    except Exception:
+                        pass
+
+            raw_candidates = [raw_items[i] for i in range(len(raw_items)) if i not in suppressed_seam_halves]
+
+            # Prioritize complete (uncut) objects first so they always supersede seam-cut slices, then score
+            raw_candidates.sort(key=lambda x: (not x["touches_seam"], x["score"]), reverse=True)
             final_kept = []
             eff_nms = max(0.15, min(0.90, nms_threshold))
 
-            for cur in raw_items:
+            for cur in raw_candidates:
                 is_dup = False
                 cb = cur["b_px"]
                 cur_area = max(1.0, (cb[2] - cb[0]) * (cb[3] - cb[1]))
@@ -3590,17 +3638,28 @@ async def predict_compat(data: Dict):
                             poly_containment = 0.0
 
                     # Deduplicate overlapping detections from adjacent chips
-                    if poly_iou > eff_nms or poly_containment > 0.65 or box_iou > 0.60:
+                    # If this is a seam-cut slice and overlaps a kept object, suppress it aggressively
+                    containment_thresh = 0.40 if cur["touches_seam"] else 0.65
+                    if poly_iou > eff_nms or poly_containment > containment_thresh or box_iou > 0.60:
                         is_dup = True
                         break
 
                 if not is_dup:
                     final_kept.append(cur)
 
+            # Suppress any remaining isolated cut slivers on internal seams
+            final_items = []
+            for cur in final_kept:
+                if cur["touches_seam"]:
+                    min_dim_m = min(cur["w_m"], cur["h_m"])
+                    if cur["poly"].area < 180 or min_dim_m < 3.5:
+                        continue
+                final_items.append(cur)
+
             west, east = float(bounds["west"]), float(bounds["east"])
             south, north = float(bounds["south"]), float(bounds["north"])
 
-            for item in final_kept:
+            for item in final_items:
                 poly_shp = item["poly"]
 
                 # Convert pixel polygon to georeferenced coordinates
