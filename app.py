@@ -3522,22 +3522,41 @@ async def predict_compat(data: Dict):
                             poly_shp = None
                             if c_masks is not None and i < len(c_masks):
                                 try:
-                                    m_tile = (c_masks[i, 0] > 0.5).astype(np.uint8)
+                                    # Calibrated mask threshold: rather than a harsh 0.5 cutoff that chops shaded
+                                    # or multi-tiered roof sections in half, calibrate to detection confidence
+                                    mask_thr = max(0.28, min(0.48, eff_threshold * 0.90))
+                                    m_tile = (c_masks[i, 0] > mask_thr).astype(np.uint8)
                                     bx1, by1, bx2, by2 = map(int, [max(0, b[0]), max(0, b[1]), min(detector_tile_size, b[2]), min(detector_tile_size, b[3])])
                                     crop_m = np.zeros_like(m_tile)
                                     crop_m[by1:by2, bx1:bx2] = m_tile[by1:by2, bx1:bx2]
 
+                                    # Morphological closing to bridge internal shadows, AC units, and roof level breaks
+                                    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+                                    crop_m = cv2.morphologyEx(crop_m, cv2.MORPH_CLOSE, kernel)
+
                                     contours, _ = cv2.findContours(crop_m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                                     if contours:
-                                        c = max(contours, key=cv2.contourArea)
-                                        if cv2.contourArea(c) >= 4:
-                                            c_approx = cv2.approxPolyDP(c, epsilon=1.0, closed=True)
-                                            pts = [(int(pt[0][0]) + ox, int(pt[0][1]) + oy) for pt in c_approx]
-                                            if len(pts) >= 3:
-                                                pts.append(pts[0])
-                                                p = ShapelyPolygon(pts)
-                                                if not p.is_valid: p = p.buffer(0)
-                                                if not p.is_empty and p.area >= 4: poly_shp = p
+                                        all_polys = []
+                                        for c in contours:
+                                            if cv2.contourArea(c) >= 6:
+                                                c_approx = cv2.approxPolyDP(c, epsilon=1.0, closed=True)
+                                                pts = [(int(pt[0][0]) + ox, int(pt[0][1]) + oy) for pt in c_approx]
+                                                if len(pts) >= 3:
+                                                    pts.append(pts[0])
+                                                    p = ShapelyPolygon(pts)
+                                                    if not p.is_valid: p = p.buffer(0)
+                                                    if not p.is_empty and p.area >= 6:
+                                                        all_polys.append(p)
+                                        if all_polys:
+                                            if len(all_polys) == 1:
+                                                poly_shp = all_polys[0]
+                                            else:
+                                                # Unite all roof sections belonging to this building instance
+                                                u_poly = unary_union(all_polys)
+                                                if u_poly.geom_type == "MultiPolygon":
+                                                    u_poly = unary_union([p.buffer(1.5) for p in all_polys]).buffer(-1.5)
+                                                if u_poly.is_valid and not u_poly.is_empty:
+                                                    poly_shp = u_poly
                                 except Exception:
                                     poly_shp = None
 
@@ -3640,20 +3659,47 @@ async def predict_compat(data: Dict):
                     # Deduplicate overlapping detections from adjacent chips
                     # If this is a seam-cut slice and overlaps a kept object, suppress it aggressively
                     containment_thresh = 0.40 if cur["touches_seam"] else 0.65
-                    if poly_iou > eff_nms or poly_containment > containment_thresh or box_iou > 0.60:
+                    if poly_iou > eff_nms or poly_containment > containment_thresh:
                         is_dup = True
                         break
 
                 if not is_dup:
                     final_kept.append(cur)
 
-            # Suppress any remaining isolated cut slivers on internal seams
+            regularize_footprints = bool(data.get("regularize", True))
+
+            # Suppress any remaining isolated cut slivers on internal seams & regularize rectangular buildings
             final_items = []
             for cur in final_kept:
                 if cur["touches_seam"]:
                     min_dim_m = min(cur["w_m"], cur["h_m"])
                     if cur["poly"].area < 180 or min_dim_m < 3.5:
                         continue
+
+                p = cur["poly"]
+                if regularize_footprints:
+                    try:
+                        if p.geom_type == "Polygon":
+                            mbr = p.minimum_rotated_rectangle
+                            if mbr.is_valid and not mbr.is_empty and mbr.area > 0:
+                                fill = p.area / mbr.area
+                                # If the building is predominantly rectangular (covers >= 62% of its rotated box)
+                                # square it into a crisp rectangular building footprint!
+                                if 0.62 <= fill <= 1.05:
+                                    p = mbr
+                        elif p.geom_type == "MultiPolygon":
+                            sub_polys = []
+                            for sp in p.geoms:
+                                mbr_sp = sp.minimum_rotated_rectangle
+                                if mbr_sp.is_valid and (sp.area / max(1.0, mbr_sp.area)) >= 0.65:
+                                    sub_polys.append(mbr_sp)
+                                else:
+                                    sub_polys.append(sp)
+                            p = unary_union(sub_polys)
+                    except Exception:
+                        pass
+
+                cur["poly"] = p
                 final_items.append(cur)
 
             west, east = float(bounds["west"]), float(bounds["east"])

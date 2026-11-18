@@ -2160,6 +2160,7 @@ function runPrediction() {
     const nmsThr = parseFloat(document.getElementById('predictNmsThreshold')?.value || '0.20');
     const maxSz = parseFloat(document.getElementById('predictMaxSize')?.value || '65');
     const minSz = parseFloat(document.getElementById('predictMinSize')?.value || '2');
+    const regularize = document.getElementById('predictRegularize') ? document.getElementById('predictRegularize').checked : true;
     const ps = document.getElementById('predictStatus'); if (ps) { ps.textContent = '⏳ Predicting...'; ps.style.color = '#fbbf24'; }
     const curZoom = mapPredict.getZoom(), aoiBoundsPayload = (aoiBounds && aoiBounds.isValid()) ? { north: aoiBounds.getNorth(), south: aoiBounds.getSouth(), east: aoiBounds.getEast(), west: aoiBounds.getWest() } : null;
 
@@ -2184,6 +2185,7 @@ function runPrediction() {
                 nms_threshold: nmsThr,
                 max_size_m: maxSz,
                 min_size_m: minSz,
+                regularize: regularize,
                 tile_size: targetTileSize,
                 label: currentLabel,
                 backbone: currentBackbone,
@@ -2227,7 +2229,7 @@ function runPrediction() {
         if (cd.bounds?.gsd && cd.bounds.gsd > 0.8) {
             addLog('warning', `Resolution is coarse (${cd.bounds.gsd}m/px). For pinpoint buildings, zoom in to a focused area.`);
         }
-        return fetch('/predict', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ model_path: loadedModelPath, image_path: cd.filepath, bounds: cd.bounds, threshold: thr, nms_threshold: nmsThr, max_size_m: maxSz, min_size_m: minSz, label: currentLabel, backbone: currentBackbone, zoom: captureZoom, aoi_bounds: aoiBoundsPayload, detection_scale: detScale, tile_size: targetTileSize, target_resolution: targetRes }) });
+        return fetch('/predict', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ model_path: loadedModelPath, image_path: cd.filepath, bounds: cd.bounds, threshold: thr, nms_threshold: nmsThr, max_size_m: maxSz, min_size_m: minSz, regularize: regularize, label: currentLabel, backbone: currentBackbone, zoom: captureZoom, aoi_bounds: aoiBoundsPayload, detection_scale: detScale, tile_size: targetTileSize, target_resolution: targetRes }) });
     })
     .then(r => r.json()).then(d => {
         if (!d.success) { addLog('error','Predict failed: ' + (d.error||'')); if (ps) { ps.textContent = '❌ Error'; ps.style.color = '#f87171'; } return; }
