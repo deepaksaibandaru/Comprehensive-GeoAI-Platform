@@ -224,6 +224,18 @@ def _inference_function_for(kind, model_type=""):
     """
     mt = normalize_model_type(model_type)
     if kind == "instance_segmentation" or mt == "mask_rcnn":
+        # Prefer BraeinAIMaskRCNN.py — a self-contained inference function
+        # that uses torchvision directly, avoiding architecture mismatches
+        # between modern torchvision and arcgis.learn's _maskrcnn_inferencing.
+        braein_script_path = os.path.join(os.path.dirname(__file__), "utils", "BraeinAIMaskRCNN.py")
+        if os.path.exists(braein_script_path):
+            with open(braein_script_path, "r", encoding="utf-8") as f:
+                return (
+                    "BraeinAIMaskRCNN.py",
+                    f.read(),
+                    True,
+                )
+        # Fallback to ArcGISInstanceDetector.py (requires arcgis.learn)
         arcgis_script_path = os.path.join(os.path.dirname(__file__), "utils", "ArcGISInstanceDetector.py")
         if os.path.exists(arcgis_script_path):
             with open(arcgis_script_path, "r", encoding="utf-8") as f:
@@ -551,12 +563,19 @@ def build_emd(
             inference_function = "BraeinAIImageClassifier.py"
 
     elif kind == "instance_segmentation" or normalize_model_type(model_type_raw) == "mask_rcnn":
-        framework = "arcgis.learn.models._inferencing"
-        model_config = "_maskrcnn_inferencing"
         esri_model_type = "InstanceDetection"
 
         if not inference_function:
-            inference_function = "ArcGISInstanceDetector.py"
+            inference_function = "BraeinAIMaskRCNN.py"
+
+        # BraeinAIMaskRCNN.py is self-contained (uses torchvision directly)
+        # and does NOT rely on arcgis.learn's _maskrcnn_inferencing.
+        if inference_function == "BraeinAIMaskRCNN.py":
+            framework = "BraeinAIMaskRCNN"
+            model_config = "BraeinAIMaskRCNN"
+        else:
+            framework = "arcgis.learn.models._inferencing"
+            model_config = "_maskrcnn_inferencing"
 
     else:
         framework = "arcgis.learn.models._inferencing"
@@ -591,7 +610,7 @@ def build_emd(
             "%s trained in Braein.ai."
             % (meta.get("architecture") or model_type_raw)
         ),
-        "Padding": 0,
+        "Padding": 56 if (is_instance_or_det or normalize_model_type(model_type_raw) == "mask_rcnn") else 0,
         "BatchSize": 1,
     }
 
@@ -603,6 +622,15 @@ def build_emd(
         emd["ArcGISLearnVersion"] = "1.8.3"
         emd["SupportsVariableTileSize"] = True
         emd["backend"] = "pytorch"
+        # Required by _maskrcnn_inferencing.ChildInstanceDetector for proper
+        # mask-head initialization; without it ArcGIS Pro may fall back to
+        # bounding-box rectangles instead of polygon instance masks.
+        emd["MaskRCNNkwargs"] = {}
+        emd["resize_to"] = None
+        emd["IsMultispectral"] = False
+        emd["score_threshold"] = float(meta.get("score_threshold", 0.40))
+        emd["max_size_m"] = float(meta.get("max_size_m", 65.0))
+        emd["min_size_m"] = float(meta.get("min_size_m", 2.0))
 
     if kind == "segmentation":
         emd["IsMultidimensional"] = False
