@@ -715,9 +715,30 @@
                                     Snaps building footprints into crisp rectangular / square shapes aligned to roof orientation.
                                 </div>
                             </div>
-                            <div class="config-section">
-                                <div class="section-title">📍 REGION MODE</div>
-                                <div style="font-size:11px;color:#94a3b8;line-height:1.7;">By default, PREDICT runs on the <strong>current map view</strong>.<br>Draw a polygon on the map to restrict to a specific AOI.</div>
+                            <div class="config-section" id="predictAoiSection">
+                                <div class="section-title" style="display:flex;justify-content:space-between;align-items:center;">
+                                    <span>📍 AOI / REGION MODE</span>
+                                    <span id="predictAoiBadge" class="badge" style="background:#0284c7;color:#fff;font-size:9.5px;padding:2px 6px;border-radius:3px;display:none;">AOI Loaded</span>
+                                </div>
+                                <div style="font-size:11px;color:#94a3b8;line-height:1.5;margin-bottom:8px;">
+                                    By default, PREDICT runs on the current view. Upload a <strong>Shapefile</strong> or draw an AOI on the map to automatically fetch, clip, and predict for that exact boundary.
+                                </div>
+                                <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+                                    <input type="file" id="predictShpUploadInput" accept=".zip,.shp,.geojson,.json,.kml" style="display:none;" onchange="handlePredictShpUpload(event)">
+                                    <button type="button" class="btn btn-sm btn-info" id="btnUploadPredictShp" onclick="document.getElementById('predictShpUploadInput').click()" style="display:flex;align-items:center;gap:5px;font-size:11px;padding:4px 9px;border-radius:4px;background:#0284c7;border:1px solid #38bdf8;color:#fff;cursor:pointer;" title="Upload ESRI Shapefile bundle (.zip) or .shp">
+                                        <i class="fas fa-file-upload"></i> Upload Shapefile
+                                    </button>
+                                    <button type="button" class="btn btn-sm btn-secondary" id="btnClearPredictAoi" onclick="clearPredictAoi()" style="display:none;font-size:11px;padding:4px 8px;border-radius:4px;background:#334155;border:1px solid #475569;color:#e2e8f0;cursor:pointer;" title="Clear AOI and reset to map view">
+                                        <i class="fas fa-times"></i> Clear AOI
+                                    </button>
+                                </div>
+                                <div id="predictAoiCard" style="display:none;margin-top:8px;background:#0a0e17;border:1px solid #0284c7;border-radius:4px;padding:6px 8px;font-size:10px;">
+                                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                                        <span id="predictAoiName" style="color:#38bdf8;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:170px;"></span>
+                                        <span id="predictAoiArea" style="color:#34d399;font-weight:600;"></span>
+                                    </div>
+                                    <div id="predictAoiDetails" style="color:#94a3b8;font-size:9.5px;margin-top:2px;"></div>
+                                </div>
                             </div>
                             <div class="config-section">
                                 <div class="section-title">📊 DETECTION RESULTS</div>

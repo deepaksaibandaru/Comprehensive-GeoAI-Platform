@@ -3291,6 +3291,119 @@ def smooth_seam_cut(poly, internal_seams, max_dist=2.5, min_seg_len=12.0):
     return poly
 
 
+@app.post("/api/predict/upload_aoi_shapefile", dependencies=[Depends(require_api_key)])
+async def api_predict_upload_aoi_shapefile(file: UploadFile = File(...)):
+    """
+    Accept an uploaded Shapefile (.zip bundle or .shp), GeoJSON, or KML,
+    reproject to WGS84 (EPSG:4326), extract its boundary polygon & bounding box,
+    and return GeoJSON for interactive display & automatic satellite capture.
+    """
+    try:
+        filename = os.path.basename(file.filename or "").strip()
+        if not filename:
+            return JSONResponse({"success": False, "error": "No file uploaded"}, status_code=400)
+
+        upload_dir = os.path.join("uploads", "aoi_shapefiles")
+        os.makedirs(upload_dir, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe_name = re.sub(r"[^a-zA-Z0-9_.-]", "_", filename)
+        file_path = os.path.join(upload_dir, f"{stamp}_{safe_name}")
+
+        content = await file.read()
+        with open(file_path, "wb") as f:
+            f.write(content)
+
+        gdf = None
+        lower_name = filename.lower()
+        if lower_name.endswith(".zip"):
+            extract_dir = os.path.join(upload_dir, f"unzipped_{stamp}")
+            os.makedirs(extract_dir, exist_ok=True)
+            with zipfile.ZipFile(file_path, "r") as z:
+                z.extractall(extract_dir)
+            shp_files = []
+            for root, _, files in os.walk(extract_dir):
+                for fn in files:
+                    if fn.lower().endswith(".shp"):
+                        shp_files.append(os.path.join(root, fn))
+            if shp_files:
+                gdf = gpd.read_file(shp_files[0])
+            else:
+                json_files = [os.path.join(root, fn) for root, _, files in os.walk(extract_dir) for fn in files if fn.lower().endswith((".geojson", ".json"))]
+                if json_files:
+                    gdf = gpd.read_file(json_files[0])
+                else:
+                    return JSONResponse({"success": False, "error": "No .shp or .geojson found inside uploaded zip file"}, status_code=400)
+        elif lower_name.endswith((".geojson", ".json", ".kml")):
+            gdf = gpd.read_file(file_path)
+        elif lower_name.endswith(".shp"):
+            gdf = gpd.read_file(file_path)
+        else:
+            return JSONResponse({"success": False, "error": "Please upload a .zip (Shapefile bundle), .shp, or .geojson file"}, status_code=400)
+
+        if gdf is None or gdf.empty:
+            return JSONResponse({"success": False, "error": "Uploaded shapefile contains no features"}, status_code=400)
+
+        # Reproject to WGS84 (EPSG:4326) if necessary
+        if gdf.crs is not None:
+            if gdf.crs.to_string() != "EPSG:4326":
+                gdf = gdf.to_crs("EPSG:4326")
+        else:
+            gdf = gdf.set_crs("EPSG:4326")
+
+        # Unified AOI shape
+        aoi_union = gdf.unary_union
+        if not aoi_union.is_valid:
+            aoi_union = aoi_union.buffer(0)
+
+        minx, miny, maxx, maxy = aoi_union.bounds
+        bounds = {
+            "west": round(float(minx), 7),
+            "south": round(float(miny), 7),
+            "east": round(float(maxx), 7),
+            "north": round(float(maxy), 7)
+        }
+
+        # Calculate area in metric units
+        try:
+            center_lat = (miny + maxy) / 2.0
+            center_lon = (minx + maxx) / 2.0
+            utm_zone = int((center_lon + 180) / 6) + 1
+            epsg_code = 32600 + utm_zone if center_lat >= 0 else 32700 + utm_zone
+            gdf_utm = gdf.to_crs(f"EPSG:{epsg_code}")
+            area_m2 = float(gdf_utm.unary_union.area)
+            if area_m2 >= 1_000_000:
+                area_str = f"{area_m2 / 1_000_000:.2f} km²"
+            elif area_m2 >= 10_000:
+                area_str = f"{area_m2 / 10_000:.2f} ha"
+            else:
+                area_str = f"{area_m2:.1f} m²"
+        except Exception:
+            area_str = ""
+
+        from shapely.geometry import mapping as shapely_mapping
+        aoi_geojson = shapely_mapping(aoi_union)
+
+        return JSONResponse({
+            "success": True,
+            "filename": filename,
+            "bounds": bounds,
+            "geojson": {
+                "type": "Feature",
+                "geometry": aoi_geojson,
+                "properties": {
+                    "name": filename,
+                    "area_str": area_str,
+                    "feature_count": len(gdf)
+                }
+            },
+            "area_str": area_str,
+            "feature_count": len(gdf)
+        })
+    except Exception as e:
+        traceback.print_exc()
+        return JSONResponse({"success": False, "error": f"Failed to parse shapefile: {str(e)}"}, status_code=500)
+
+
 @app.post("/predict", dependencies=[Depends(require_api_key)])
 async def predict_compat(data: Dict):
     prediction_started_at = time.perf_counter()
@@ -3713,31 +3826,47 @@ async def predict_compat(data: Dict):
                 if feat is not None: feat["properties"]["pixel_count"] = pixel_area; feat["properties"]["confidence"] = round(float(np.mean(prob_map[component_labels == component_id])), 4); features.append(feat); components_kept += 1
 
         dropped = 0
-        if aoi_bounds and isinstance(aoi_bounds, dict):
+        aoi_clip_shape = None
+        if data.get("aoi_geometry") and isinstance(data["aoi_geometry"], dict):
             try:
-                aoi_geom = box(float(aoi_bounds["west"]), float(aoi_bounds["south"]), float(aoi_bounds["east"]), float(aoi_bounds["north"]))
+                from shapely.geometry import shape as to_shape
+                aoi_clip_shape = to_shape(data["aoi_geometry"])
+                if not aoi_clip_shape.is_valid:
+                    aoi_clip_shape = aoi_clip_shape.buffer(0)
+            except Exception:
+                aoi_clip_shape = None
+        if aoi_clip_shape is None and aoi_bounds and isinstance(aoi_bounds, dict):
+            try:
+                aoi_clip_shape = box(float(aoi_bounds["west"]), float(aoi_bounds["south"]), float(aoi_bounds["east"]), float(aoi_bounds["north"]))
+            except Exception:
+                aoi_clip_shape = None
+
+        if aoi_clip_shape is not None and not aoi_clip_shape.is_empty:
+            try:
                 kept = []
                 for feat in features:
                     try:
-                        geom = feat["geometry"]
-                        if geom.get("type") not in ("Polygon", "MultiPolygon"):
+                        geom = feat.get("geometry")
+                        if not geom or geom.get("type") not in ("Polygon", "MultiPolygon"):
                             kept.append(feat)
                             continue
                         if geom.get("type") == "Polygon":
                             poly = ShapelyPolygon(geom["coordinates"][0])
                         else:
                             poly = unary_union([ShapelyPolygon(ring[0]) for ring in geom["coordinates"] if len(ring[0]) >= 3])
-                        if not poly.is_valid: poly = poly.buffer(0)
+                        if not poly.is_valid:
+                            poly = poly.buffer(0)
                         # Keep complete object if it touches/intersects the AOI.
-                        # Never slice or chop buildings in half with the AOI bounding box!
-                        if not poly.intersects(aoi_geom):
+                        # Never slice or chop buildings in half with the AOI boundary!
+                        if not poly.intersects(aoi_clip_shape):
                             dropped += 1
                             continue
                         kept.append(feat)
                     except Exception:
                         dropped += 1
                 features = kept
-            except Exception: pass
+            except Exception:
+                pass
             
         # Clean RFC 7946 GeoJSON: no top-level crs property (standard requires EPSG:4326 without crs tag)
         geojson = {"type": "FeatureCollection", "features": features}

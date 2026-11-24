@@ -2163,6 +2163,7 @@ function runPrediction() {
     const regularize = document.getElementById('predictRegularize') ? document.getElementById('predictRegularize').checked : false;
     const ps = document.getElementById('predictStatus'); if (ps) { ps.textContent = '⏳ Predicting...'; ps.style.color = '#fbbf24'; }
     const curZoom = mapPredict.getZoom(), aoiBoundsPayload = (aoiBounds && aoiBounds.isValid()) ? { north: aoiBounds.getNorth(), south: aoiBounds.getSouth(), east: aoiBounds.getEast(), west: aoiBounds.getWest() } : null;
+    const aoiGeometryPayload = window.predictAoiGeometry || null;
 
     const targetTileSizeVal = parseInt(document.getElementById('predictTileSize')?.value || '256', 10);
     const targetTileSize = (targetTileSizeVal > 0 && Number.isFinite(targetTileSizeVal)) ? targetTileSizeVal : 256;
@@ -2189,7 +2190,8 @@ function runPrediction() {
                 tile_size: targetTileSize,
                 label: currentLabel,
                 backbone: currentBackbone,
-                aoi_bounds: aoiBoundsPayload
+                aoi_bounds: aoiBoundsPayload,
+                aoi_geometry: aoiGeometryPayload
             })
         })
         .then(r => r.json())
@@ -2229,7 +2231,7 @@ function runPrediction() {
         if (cd.bounds?.gsd && cd.bounds.gsd > 0.8) {
             addLog('warning', `Resolution is coarse (${cd.bounds.gsd}m/px). For pinpoint buildings, zoom in to a focused area.`);
         }
-        return fetch('/predict', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ model_path: loadedModelPath, image_path: cd.filepath, bounds: cd.bounds, threshold: thr, nms_threshold: nmsThr, max_size_m: maxSz, min_size_m: minSz, regularize: regularize, label: currentLabel, backbone: currentBackbone, zoom: captureZoom, aoi_bounds: aoiBoundsPayload, detection_scale: detScale, tile_size: targetTileSize, target_resolution: targetRes }) });
+        return fetch('/predict', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ model_path: loadedModelPath, image_path: cd.filepath, bounds: cd.bounds, threshold: thr, nms_threshold: nmsThr, max_size_m: maxSz, min_size_m: minSz, regularize: regularize, label: currentLabel, backbone: currentBackbone, zoom: captureZoom, aoi_bounds: aoiBoundsPayload, aoi_geometry: aoiGeometryPayload, detection_scale: detScale, tile_size: targetTileSize, target_resolution: targetRes }) });
     })
     .then(r => r.json()).then(d => {
         if (!d.success) { addLog('error','Predict failed: ' + (d.error||'')); if (ps) { ps.textContent = '❌ Error'; ps.style.color = '#f87171'; } return; }
@@ -2389,5 +2391,116 @@ function useDataset(key) { const m = document.getElementById('mapServiceSelect')
 function loadUploadedDatasets() { fetch('/api/uploaded_datasets').then(r => r.json()).then(d => { const tbody = document.getElementById('uploadedDatasetsBody'); if (!tbody) return; tbody.innerHTML = ''; if (d.success && d.sessions && d.sessions.length) { d.sessions.forEach((s, i) => { tbody.innerHTML += `<tr><td>${i+1}</td><td>${s.session_id}</td><td>${s.upload_date ? new Date(s.upload_date).toLocaleString() : '—'}</td><td>${s.total_size_mb || 0} MB</td><td>${s.file_count || 0}</td><td>—</td><td><button class="btn btn-danger btn-xs" onclick="deleteDataset('${s.session_id}')">Delete</button></td></tr>`; }); } }); }
 function deleteDataset(sid) { if (!confirm('Delete session?')) return; fetch('/api/uploaded_datasets/' + sid, {method:'DELETE'}).then(r => r.json()).then(d => { if (d.success) loadUploadedDatasets(); }); }
 
+function handlePredictShpUpload(event) {
+    const file = event.target.files ? event.target.files[0] : null;
+    if (!file) return;
+
+    const btn = document.getElementById('btnUploadPredictShp');
+    const originalText = btn ? btn.innerHTML : '';
+    if (btn) {
+        btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Reading...';
+        btn.disabled = true;
+    }
+    const ps = document.getElementById('predictStatus');
+    if (ps) { ps.textContent = '⏳ Reading Shapefile AOI...'; ps.style.color = '#fbbf24'; }
+    addLog('info', `Reading shapefile "${file.name}"...`);
+
+    const formData = new FormData();
+    formData.append('file', file);
+
+    fetch('/api/predict/upload_aoi_shapefile', {
+        method: 'POST',
+        body: formData
+    })
+    .then(r => r.json())
+    .then(d => {
+        if (!d.success) {
+            throw new Error(d.error || 'Failed to process shapefile');
+        }
+
+        // Clear existing predict drawn items
+        if (predictDrawnItems) predictDrawnItems.clearLayers();
+
+        // Add AOI GeoJSON layer to mapPredict
+        const aoiGeoLayer = L.geoJSON(d.geojson, {
+            style: {
+                color: '#fbbf24',
+                weight: 3,
+                opacity: 0.95,
+                fillColor: '#38bdf8',
+                fillOpacity: 0.22,
+                dashArray: '5, 5'
+            }
+        });
+        if (predictDrawnItems) predictDrawnItems.addLayer(aoiGeoLayer);
+        aoiLayer = aoiGeoLayer;
+
+        // Zoom to AOI bounds
+        const b = d.bounds;
+        const latLngBounds = L.latLngBounds([[b.south, b.west], [b.north, b.east]]);
+        if (mapPredict && latLngBounds.isValid()) {
+            mapPredict.fitBounds(latLngBounds, { padding: [30, 30], maxZoom: 19 });
+        }
+        window.aoiBounds = latLngBounds;
+        window.predictAoiGeometry = d.geojson.geometry;
+
+        // Update UI Card
+        const card = document.getElementById('predictAoiCard');
+        const badge = document.getElementById('predictAoiBadge');
+        const clearBtn = document.getElementById('btnClearPredictAoi');
+        const nameEl = document.getElementById('predictAoiName');
+        const areaEl = document.getElementById('predictAoiArea');
+        const detEl = document.getElementById('predictAoiDetails');
+
+        if (card) card.style.display = 'block';
+        if (badge) badge.style.display = 'inline-block';
+        if (clearBtn) clearBtn.style.display = 'inline-block';
+        if (nameEl) nameEl.textContent = d.filename;
+        if (areaEl) areaEl.textContent = d.area_str || '';
+        if (detEl) {
+            detEl.textContent = `${d.feature_count} feature(s) • [${b.south.toFixed(4)}, ${b.west.toFixed(4)}] to [${b.north.toFixed(4)}, ${b.east.toFixed(4)}]`;
+        }
+
+        const s = document.getElementById('predictStatusText');
+        if (s) s.textContent = `📍 AOI loaded from Shapefile (${d.area_str || ''}) — click PREDICT`;
+        if (ps) { ps.textContent = `✅ AOI Loaded (${d.filename})`; ps.style.color = '#34d399'; }
+        addLog('success', `AOI loaded: ${d.filename} (${d.area_str || ''}). Click PREDICT to run.`);
+    })
+    .catch(err => {
+        addLog('error', `Shapefile upload error: ${err.message}`);
+        if (ps) { ps.textContent = `❌ ${err.message}`; ps.style.color = '#f87171'; }
+        alert(`Error loading Shapefile: ${err.message}`);
+    })
+    .finally(() => {
+        if (btn) {
+            btn.innerHTML = originalText || '<i class="fas fa-file-upload"></i> Upload Shapefile';
+            btn.disabled = false;
+        }
+        event.target.value = '';
+    });
+}
+
+function clearPredictAoi() {
+    if (predictDrawnItems) predictDrawnItems.clearLayers();
+    window.aoiBounds = null;
+    window.aoiLayer = null;
+    window.predictAoiGeometry = null;
+
+    const card = document.getElementById('predictAoiCard');
+    const badge = document.getElementById('predictAoiBadge');
+    const clearBtn = document.getElementById('btnClearPredictAoi');
+    if (card) card.style.display = 'none';
+    if (badge) badge.style.display = 'none';
+    if (clearBtn) clearBtn.style.display = 'none';
+
+    const s = document.getElementById('predictStatusText');
+    if (s) s.textContent = 'Pan to any region, or draw an AOI';
+    const ps = document.getElementById('predictStatus');
+    if (ps) { ps.textContent = 'Ready'; ps.style.color = '#94a3b8'; }
+    addLog('info', 'Cleared AOI. Predict will evaluate current map view.');
+}
+
+window.handlePredictShpUpload = handlePredictShpUpload;
+window.clearPredictAoi = clearPredictAoi;
 window.toggleDrawAoiMode = toggleDrawAoiMode; window.handleAoiCreated = handleAoiCreated; window.zoomToAoi = zoomToAoi; window.toggleEditAoi = toggleEditAoi; window.deleteUserAoi = deleteUserAoi; window.clearAllUserAois = clearAllUserAois; window.toggleClusterOptions = toggleClusterOptions; window.executeClusterAOIs = executeClusterAOIs;
 window.selectProject = selectProject; window.deleteProject = deleteProject; window.showCreateProject = showCreateProject; window.closeCreateProject = closeCreateProject; window.createProjectFromNewModal = createProjectFromNewModal; window.createNewLabel = createNewLabel; window.selectLabel = selectLabel; window.startTraining = startTraining; window.stopTraining = stopTraining; window.runOverfitTest = runOverfitTest; window.loadModel = loadModel; window.deleteModel = deleteModel; window.showLoadModelDialog = showLoadModelDialog; window.evaluateModel = evaluateModel; window.clearEvaluationMetrics = clearEvaluationMetrics; window.drawEvaluationPolygons = drawEvaluationPolygons; window.runPrediction = runPrediction; window.runBatchPredict = runBatchPredict; window.clearPrediction = clearPrediction; window.downloadShapefile = downloadShapefile; window.downloadGeoJSON = downloadGeoJSON; window.exportGeoJSON = exportGeoJSON; window.exportShapefile = exportShapefile; window.mergeAllLabels = mergeAllLabels; window.downloadFile = downloadFile; window.saveAnnotations = saveAnnotations; window.loadAnnotations = loadAnnotations; window.clearAll = clearAll; window.deleteSelectedShape = deleteSelectedShape; window.previewLabelClusterAOIs = previewLabelClusterAOIs; window.clearLabelClusterAOIs = clearLabelClusterAOIs; window.setAOI = setAOI; window.captureMap = captureMap; window.lockTrainingScale = lockTrainingScale; window.buildDataset = buildDataset; window.saveTrainedModel = saveTrainedModel; window.openFolderBrowser = openFolderBrowser; window.showDashboard = showDashboard; window.showProjects = showProjects; window.showModels = showModels; window.showPublicDatasets = showPublicDatasets; window.showUploadedDatasets = showUploadedDatasets; window.showPurchasedDatasets = showPurchasedDatasets; window.showDownload = showDownload; window.switchWorkflow = switchWorkflow; window.searchLocation = searchLocation; window.searchPredictLocation = searchPredictLocation; window.searchEvalLocation = searchEvalLocation; window.refreshPublicDatasets = refreshPublicDatasets; window.refreshAnnotationModalList = refreshAnnotationModalList; window.loadUploadedDatasets = loadUploadedDatasets; window.loadProjects = loadProjects; window.loadModels = loadModels; window.loadLabels = loadLabels; window.renderPredictResults = renderPredictResults; window.zoomToPrediction = zoomToPrediction; window.getCurrentModelType = getCurrentModelType; window.isMaskRCNNModel = isMaskRCNNModel; window.toggleAdvanced = toggleAdvanced; window.getAdvancedTrainingSettings = getAdvancedTrainingSettings; window.loadModelFromModalDropdown = loadModelFromModalDropdown; window.refreshEvaluateModelStatus = refreshEvaluateModelStatus; window.layerToPolygonRing = layerToPolygonRing; window.layerToPolygonFeature = layerToPolygonFeature; window.ringToPolygonGeometry = ringToPolygonGeometry; window.featureToPolygonRing = featureToPolygonRing; window.importDlpk = importDlpk; window.exportDlpk = exportDlpk; window.downloadModel = downloadModel; window.loadFineTuneModelChoices = loadFineTuneModelChoices; window.selectFineTuneExistingModel = selectFineTuneExistingModel; window.importFineTuneModel = importFineTuneModel; window.startTrainingOrFineTune = startTrainingOrFineTune; window.startFineTune = startFineTune; window.exportModelWithFormat = exportModelWithFormat; window.setPredictResolution = setPredictResolution; window.updatePredictResolutionBadge = updatePredictResolutionBadge; window.applySuggestedThreshold = applySuggestedThreshold; window.setPredictTileSize = setPredictTileSize; window.updatePredictTileSizeBadge = updatePredictTileSizeBadge; window.setPredictSource = setPredictSource;
