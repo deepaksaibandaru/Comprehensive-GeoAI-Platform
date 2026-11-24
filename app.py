@@ -3437,181 +3437,107 @@ async def predict_compat(data: Dict):
             import torchvision.transforms.functional as TF
             full_tensor = TF.to_tensor(img_pil).to(device)
 
-            # Direct whole-image inference:
-            # Whenever the image/AOI is within GPU capacity (<= 2560x2560), evaluate directly in ONE pass!
-            # This completely avoids slicing into chips, eliminating ALL chip borders, seam cuts, and tile slices!
-            MAX_DIRECT_DIM = 2560
-            use_direct = (max(W, H) <= MAX_DIRECT_DIM)
+            # Detector tile and overlap configuration matching ArcGIS Pro DLPK (BraeinAIMaskRCNN.py)
+            detector_tile_size = int(data.get("tile_size") or 512)
+            if detector_tile_size < 256:
+                detector_tile_size = 512
+            detector_overlap = max(64, int(detector_tile_size * 0.25))
+            detector_stride = max(1, detector_tile_size - detector_overlap)
 
-            if use_direct:
-                print(f"[PREDICT] Direct Whole-Image inference on {W}x{H} image (0 chips, 0 seam cuts) | thresh={eff_threshold:.2f} nms={nms_threshold:.2f}", flush=True)
-                if hasattr(model, "transform"):
-                    # Keep 1:1 native scale without downscaling or upscaling
-                    model.transform.min_size = (min(W, H),)
-                    model.transform.max_size = max(W, H, 1024)
+            # Slicing raster into chips (sliding window with overlap)
+            # When the image fits in one chip (max(W, H) <= detector_tile_size), exactly 1 chip is produced [(0, 0)].
+            # When the image is larger (e.g. 1800x1400 AOI), it is tiled with 25% overlap, identical to ArcGIS Pro!
+            ys = list(range(0, max(H - detector_tile_size, 0) + 1, detector_stride)) or [0]
+            xs = list(range(0, max(W - detector_tile_size, 0) + 1, detector_stride)) or [0]
+            if ys[-1] != max(H - detector_tile_size, 0): ys.append(max(H - detector_tile_size, 0))
+            if xs[-1] != max(W - detector_tile_size, 0): xs.append(max(W - detector_tile_size, 0))
 
-                with torch.inference_mode():
-                    preds_list = model([full_tensor])
+            chips = [(cx, cy) for cy in ys for cx in xs]
+            print(f"[PREDICT] Tile-based detector inference: {len(chips)} chips of size {detector_tile_size}x{detector_tile_size} (overlap={detector_overlap}px) | thresh={eff_threshold:.2f} nms={nms_threshold:.2f}", flush=True)
 
-                tiles_processed = 1
-                preds = preds_list[0]
-                c_boxes = preds.get("boxes", torch.empty((0, 4))).cpu().detach().numpy()
-                c_scores = preds.get("scores", torch.empty(0)).cpu().detach().numpy()
-                c_masks = preds.get("masks", None)
-                if c_masks is not None:
-                    c_masks = c_masks.cpu().detach().numpy()
-                c_labels = preds.get("labels", torch.empty(0, dtype=torch.int64)).cpu().detach().numpy()
+            if hasattr(model, "transform"):
+                model.transform.min_size = (detector_tile_size,)
+                model.transform.max_size = max(detector_tile_size * 2, 1024)
 
-                for i in range(len(c_scores)):
-                    s = float(c_scores[i])
-                    if s < eff_threshold:
-                        continue
-                    b = c_boxes[i]
-                    bw, bh = float(b[2] - b[0]), float(b[3] - b[1])
-                    if min(bw, bh) < 4:
-                        continue
+            batch_size = 4
+            with torch.inference_mode():
+                for b_start in range(0, len(chips), batch_size):
+                    b_chips = chips[b_start:b_start + batch_size]
+                    b_tensors, valid_b_chips = [], []
+                    for ox, oy in b_chips:
+                        chip_t = full_tensor[:, oy:oy + detector_tile_size, ox:ox + detector_tile_size]
+                        if chip_t.shape[1] != detector_tile_size or chip_t.shape[2] != detector_tile_size:
+                            pad_h = detector_tile_size - chip_t.shape[1]
+                            pad_w = detector_tile_size - chip_t.shape[2]
+                            chip_t = torch.nn.functional.pad(chip_t, (0, pad_w, 0, pad_h), mode="replicate")
+                        if chip_t.std() < 0.005: continue
+                        b_tensors.append(chip_t)
+                        valid_b_chips.append((ox, oy))
 
-                    w_m = bw * m_per_px
-                    h_m = bh * m_per_px
-                    if min_size_m > 0 and (w_m < min_size_m or h_m < min_size_m):
-                        continue
-                    if max_size_m > 0 and (w_m > max_size_m or h_m > max_size_m):
-                        continue
+                    if not b_tensors: continue
+                    preds_list = model(b_tensors)
+                    for (ox, oy), preds in zip(valid_b_chips, preds_list):
+                        tiles_processed += 1
+                        c_boxes = preds.get("boxes", torch.empty((0, 4))).cpu().detach().numpy()
+                        c_scores = preds.get("scores", torch.empty(0)).cpu().detach().numpy()
+                        c_masks = preds.get("masks", None)
+                        if c_masks is not None: c_masks = c_masks.cpu().detach().numpy()
+                        c_labels = preds.get("labels", torch.empty(0, dtype=torch.int64)).cpu().detach().numpy()
 
-                    poly_shp = None
-                    if c_masks is not None and i < len(c_masks):
-                        try:
-                            # Direct binary mask from the neural network (no artificial distortion)
-                            m_binary = (c_masks[i, 0] > 0.50).astype(np.uint8)
-                            contours, _ = cv2.findContours(m_binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                            if contours:
-                                all_polys = []
-                                for c in contours:
-                                    if cv2.contourArea(c) >= 6:
-                                        c_approx = cv2.approxPolyDP(c, epsilon=1.0, closed=True)
-                                        pts = [(int(pt[0][0]), int(pt[0][1])) for pt in c_approx]
-                                        if len(pts) >= 3:
-                                            pts.append(pts[0])
-                                            p = ShapelyPolygon(pts)
-                                            if not p.is_valid: p = p.buffer(0)
-                                            if not p.is_empty and p.area >= 6:
-                                                all_polys.append(p)
-                                if all_polys:
-                                    poly_shp = all_polys[0] if len(all_polys) == 1 else max(all_polys, key=lambda p: p.area)
-                        except Exception:
+                        for i in range(len(c_scores)):
+                            s = float(c_scores[i])
+                            if s < eff_threshold: continue
+                            b = c_boxes[i]
+                            bw, bh = float(b[2] - b[0]), float(b[3] - b[1])
+                            if min(bw, bh) < 4: continue
+
+                            w_m = bw * m_per_px
+                            h_m = bh * m_per_px
+                            if min_size_m > 0 and (w_m < min_size_m or h_m < min_size_m): continue
+                            if max_size_m > 0 and (w_m > max_size_m or h_m > max_size_m): continue
+
+                            gx1, gy1, gx2, gy2 = float(b[0] + ox), float(b[1] + oy), float(b[2] + ox), float(b[3] + oy)
                             poly_shp = None
+                            if c_masks is not None and i < len(c_masks):
+                                try:
+                                    m_binary = (c_masks[i, 0] > 0.50).astype(np.uint8)
+                                    contours, _ = cv2.findContours(m_binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                                    if contours:
+                                        all_polys = []
+                                        tile_area = float(detector_tile_size * detector_tile_size)
+                                        for c in contours:
+                                            c_area = cv2.contourArea(c)
+                                            # Filter out small noise and full-tile/desert boundary artifacts (matching BraeinAIMaskRCNN.py)
+                                            if c_area < 6.0 or c_area >= 0.60 * tile_area:
+                                                continue
+                                            c_approx = cv2.approxPolyDP(c, epsilon=1.0, closed=True)
+                                            pts = [(int(pt[0][0]) + ox, int(pt[0][1]) + oy) for pt in c_approx]
+                                            if len(pts) >= 3:
+                                                pts.append(pts[0])
+                                                p = ShapelyPolygon(pts)
+                                                if not p.is_valid: p = p.buffer(0)
+                                                if not p.is_empty and p.area >= 6.0:
+                                                    all_polys.append(p)
+                                        if all_polys:
+                                            poly_shp = all_polys[0] if len(all_polys) == 1 else max(all_polys, key=lambda p: p.area)
+                                except Exception:
+                                    poly_shp = None
 
-                    if poly_shp is None:
-                        continue
+                            if poly_shp is None: continue
 
-                    lbl = int(c_labels[i]) if (c_labels is not None and i < len(c_labels)) else 1
-                    c_name = _prediction_class_name(lbl, model_class_names)
-                    if str(c_name).strip() in ("1", "0", "", "Class_1", "Object", "object", "nodata", "no_data", "background", "__background__"):
-                        c_name = default_model_label
+                            lbl = int(c_labels[i]) if (c_labels is not None and i < len(c_labels)) else 1
+                            c_name = _prediction_class_name(lbl, model_class_names)
+                            if str(c_name).strip() in ("1", "0", "", "Class_1", "Object", "object", "nodata", "no_data", "background", "__background__"):
+                                c_name = default_model_label
 
-                    raw_items.append({
-                        "b_px": [float(b[0]), float(b[1]), float(b[2]), float(b[3])],
-                        "score": s,
-                        "lbl": lbl,
-                        "c_name": c_name,
-                        "poly": poly_shp,
-                        "w_m": w_m,
-                        "h_m": h_m
-                    })
-            else:
-                # Sliding window inference for massive GeoTIFF rasters (>1536px)
-                detector_tile_size = int(data.get("tile_size") or 512)
-                if detector_tile_size < 256: detector_tile_size = 256
-                detector_overlap = max(128, int(detector_tile_size * 0.35))
-                detector_stride = max(1, detector_tile_size - detector_overlap)
-
-                ys = list(range(0, max(H - detector_tile_size, 0) + 1, detector_stride)) or [0]
-                xs = list(range(0, max(W - detector_tile_size, 0) + 1, detector_stride)) or [0]
-                if ys[-1] != max(H - detector_tile_size, 0): ys.append(max(H - detector_tile_size, 0))
-                if xs[-1] != max(W - detector_tile_size, 0): xs.append(max(W - detector_tile_size, 0))
-
-                chips = [(cx, cy) for cy in ys for cx in xs]
-                print(f"[PREDICT] Large raster inference: {len(chips)} chips of size {detector_tile_size}x{detector_tile_size} (overlap={detector_overlap}px)", flush=True)
-
-                if hasattr(model, "transform"):
-                    model.transform.min_size = (detector_tile_size,)
-                    model.transform.max_size = max(detector_tile_size * 2, 1024)
-
-                batch_size = 4
-                with torch.inference_mode():
-                    for b_start in range(0, len(chips), batch_size):
-                        b_chips = chips[b_start:b_start + batch_size]
-                        b_tensors, valid_b_chips = [], []
-                        for ox, oy in b_chips:
-                            chip_t = full_tensor[:, oy:oy + detector_tile_size, ox:ox + detector_tile_size]
-                            if chip_t.shape[1] != detector_tile_size or chip_t.shape[2] != detector_tile_size:
-                                pad_h = detector_tile_size - chip_t.shape[1]
-                                pad_w = detector_tile_size - chip_t.shape[2]
-                                chip_t = torch.nn.functional.pad(chip_t, (0, pad_w, 0, pad_h), mode="replicate")
-                            if chip_t.std() < 0.005: continue
-                            b_tensors.append(chip_t)
-                            valid_b_chips.append((ox, oy))
-
-                        if not b_tensors: continue
-                        preds_list = model(b_tensors)
-                        for (ox, oy), preds in zip(valid_b_chips, preds_list):
-                            tiles_processed += 1
-                            c_boxes = preds.get("boxes", torch.empty((0, 4))).cpu().detach().numpy()
-                            c_scores = preds.get("scores", torch.empty(0)).cpu().detach().numpy()
-                            c_masks = preds.get("masks", None)
-                            if c_masks is not None: c_masks = c_masks.cpu().detach().numpy()
-                            c_labels = preds.get("labels", torch.empty(0, dtype=torch.int64)).cpu().detach().numpy()
-
-                            for i in range(len(c_scores)):
-                                s = float(c_scores[i])
-                                if s < eff_threshold: continue
-                                b = c_boxes[i]
-                                bw, bh = float(b[2] - b[0]), float(b[3] - b[1])
-                                if min(bw, bh) < 4: continue
-
-                                w_m = bw * m_per_px
-                                h_m = bh * m_per_px
-                                if min_size_m > 0 and (w_m < min_size_m or h_m < min_size_m): continue
-                                if max_size_m > 0 and (w_m > max_size_m or h_m > max_size_m): continue
-
-                                gx1, gy1, gx2, gy2 = float(b[0] + ox), float(b[1] + oy), float(b[2] + ox), float(b[3] + oy)
-                                poly_shp = None
-                                if c_masks is not None and i < len(c_masks):
-                                    try:
-                                        m_binary = (c_masks[i, 0] > 0.50).astype(np.uint8)
-                                        contours, _ = cv2.findContours(m_binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                                        if contours:
-                                            all_polys = []
-                                            for c in contours:
-                                                if cv2.contourArea(c) >= 6:
-                                                    c_approx = cv2.approxPolyDP(c, epsilon=1.0, closed=True)
-                                                    pts = [(int(pt[0][0]) + ox, int(pt[0][1]) + oy) for pt in c_approx]
-                                                    if len(pts) >= 3:
-                                                        pts.append(pts[0])
-                                                        p = ShapelyPolygon(pts)
-                                                        if not p.is_valid: p = p.buffer(0)
-                                                        if not p.is_empty and p.area >= 6:
-                                                            all_polys.append(p)
-                                            if all_polys:
-                                                poly_shp = all_polys[0] if len(all_polys) == 1 else max(all_polys, key=lambda p: p.area)
-                                    except Exception:
-                                        poly_shp = None
-
-                                if poly_shp is None: continue
-
-                                lbl = int(c_labels[i]) if (c_labels is not None and i < len(c_labels)) else 1
-                                c_name = _prediction_class_name(lbl, model_class_names)
-                                if str(c_name).strip() in ("1", "0", "", "Class_1", "Object", "object", "nodata", "no_data", "background", "__background__"):
-                                    c_name = default_model_label
-
-                                raw_items.append({
-                                    "b_px": [gx1, gy1, gx2, gy2],
-                                    "score": s,
-                                    "lbl": lbl,
-                                    "c_name": c_name,
-                                    "poly": poly_shp,
-                                    "w_m": w_m, "h_m": h_m
-                                })
+                            raw_items.append({
+                                "b_px": [gx1, gy1, gx2, gy2],
+                                "score": s,
+                                "lbl": lbl,
+                                "c_name": c_name,
+                                "poly": poly_shp,
+                                "w_m": w_m, "h_m": h_m
+                            })
 
             # Standard Non-Maximum Suppression (NMS) to eliminate duplicate proposals
             raw_items.sort(key=lambda x: x["score"], reverse=True)
@@ -3637,19 +3563,23 @@ async def predict_compat(data: Dict):
                     box_iou = inter_box / max(1.0, union_box)
 
                     poly_iou = 0.0
+                    containment = 0.0
                     if cur["poly"].intersects(prev["poly"]):
                         try:
                             p_inter = cur["poly"].intersection(prev["poly"]).area
                             p_union = cur["poly"].area + prev["poly"].area - p_inter
                             poly_iou = p_inter / max(1.0, p_union)
+                            containment = p_inter / max(1.0, min(cur["poly"].area, prev["poly"].area))
                         except Exception:
                             poly_iou = 0.0
+                            containment = 0.0
 
                     # For polygon instance segmentation:
-                    # Detections are duplicate only if their polygon masks genuinely overlap (poly_iou > eff_nms)
-                    # or if bounding boxes are nearly identical (box_iou > 0.70).
+                    # Detections are duplicate if their polygon masks overlap (poly_iou > eff_nms),
+                    # if one polygon is >= 65% contained inside the other (tile slice duplicate),
+                    # or if bounding boxes are nearly identical (box_iou > 0.60).
                     # Do NOT eliminate separate adjacent buildings whose polygon footprints do not overlap!
-                    if poly_iou > eff_nms or box_iou > 0.70:
+                    if poly_iou > eff_nms or containment > 0.65 or box_iou > 0.60:
                         is_dup = True
                         break
 
