@@ -3437,66 +3437,86 @@ async def predict_compat(data: Dict):
             import torchvision.transforms.functional as TF
             full_tensor = TF.to_tensor(img_pil).to(device)
 
-            # Detector tile and overlap configuration matching ArcGIS Pro DLPK (BraeinAIMaskRCNN.py)
-            detector_tile_size = int(data.get("tile_size") or 512)
-            if detector_tile_size < 256:
-                detector_tile_size = 512
-            detector_overlap = max(64, int(detector_tile_size * 0.25))
-            detector_stride = max(1, detector_tile_size - detector_overlap)
+            # Core tile size and padding margin (matching ArcGIS Pro DLPK tile and padding)
+            core_size = int(data.get("tile_size") or 512)
+            if core_size < 256:
+                core_size = 512
+            padding = max(64, int(core_size * 0.25))  # 128px for 512 tile, 64px for 256 tile
+            chip_size = core_size + 2 * padding
 
-            # Slicing raster into chips (sliding window with overlap)
-            # When the image fits in one chip (max(W, H) <= detector_tile_size), exactly 1 chip is produced [(0, 0)].
-            # When the image is larger (e.g. 1800x1400 AOI), it is tiled with 25% overlap, identical to ArcGIS Pro!
-            ys = list(range(0, max(H - detector_tile_size, 0) + 1, detector_stride)) or [0]
-            xs = list(range(0, max(W - detector_tile_size, 0) + 1, detector_stride)) or [0]
-            if ys[-1] != max(H - detector_tile_size, 0): ys.append(max(H - detector_tile_size, 0))
-            if xs[-1] != max(W - detector_tile_size, 0): xs.append(max(W - detector_tile_size, 0))
+            gx_list = list(range(0, W, core_size))
+            gy_list = list(range(0, H, core_size))
 
-            chips = [(cx, cy) for cy in ys for cx in xs]
-            print(f"[PREDICT] Tile-based detector inference: {len(chips)} chips of size {detector_tile_size}x{detector_tile_size} (overlap={detector_overlap}px) | thresh={eff_threshold:.2f} nms={nms_threshold:.2f}", flush=True)
+            chips_meta = []
+            for gy in gy_list:
+                for gx in gx_list:
+                    core_x1, core_x2 = gx, min(W, gx + core_size)
+                    core_y1, core_y2 = gy, min(H, gy + core_size)
+                    px1 = max(0, gx - padding)
+                    py1 = max(0, gy - padding)
+                    px2 = min(W, gx + core_size + padding)
+                    py2 = min(H, gy + core_size + padding)
+                    chips_meta.append({
+                        "core": (core_x1, core_y1, core_x2, core_y2),
+                        "pad": (px1, py1, px2, py2)
+                    })
+
+            print(f"[PREDICT] Tile-based detector inference: {len(chips_meta)} padded chips (core={core_size}px, pad={padding}px, chip={chip_size}px) | thresh={eff_threshold:.2f} nms={nms_threshold:.2f}", flush=True)
 
             if hasattr(model, "transform"):
-                model.transform.min_size = (detector_tile_size,)
-                model.transform.max_size = max(detector_tile_size * 2, 1024)
+                model.transform.min_size = (chip_size,)
+                model.transform.max_size = max(chip_size * 2, 1024)
 
             batch_size = 4
             with torch.inference_mode():
-                for b_start in range(0, len(chips), batch_size):
-                    b_chips = chips[b_start:b_start + batch_size]
-                    b_tensors, valid_b_chips = [], []
-                    for ox, oy in b_chips:
-                        chip_t = full_tensor[:, oy:oy + detector_tile_size, ox:ox + detector_tile_size]
-                        if chip_t.shape[1] != detector_tile_size or chip_t.shape[2] != detector_tile_size:
-                            pad_h = detector_tile_size - chip_t.shape[1]
-                            pad_w = detector_tile_size - chip_t.shape[2]
-                            chip_t = torch.nn.functional.pad(chip_t, (0, pad_w, 0, pad_h), mode="replicate")
-                        if chip_t.std() < 0.005: continue
+                for b_start in range(0, len(chips_meta), batch_size):
+                    b_meta = chips_meta[b_start:b_start + batch_size]
+                    b_tensors, valid_meta = [], []
+                    for meta_item in b_meta:
+                        px1, py1, px2, py2 = meta_item["pad"]
+                        chip_t = full_tensor[:, py1:py2, px1:px2]
+                        ch, cw = chip_t.shape[1], chip_t.shape[2]
+                        if chip_t.std() < 0.005:
+                            continue
+                        pad_r = max(0, chip_size - cw)
+                        pad_b = max(0, chip_size - ch)
+                        if pad_r > 0 or pad_b > 0:
+                            chip_t = torch.nn.functional.pad(chip_t, (0, pad_r, 0, pad_b), mode="replicate")
                         b_tensors.append(chip_t)
-                        valid_b_chips.append((ox, oy))
+                        valid_meta.append(meta_item)
 
-                    if not b_tensors: continue
+                    if not b_tensors:
+                        continue
+
                     preds_list = model(b_tensors)
-                    for (ox, oy), preds in zip(valid_b_chips, preds_list):
+                    for meta_item, preds in zip(valid_meta, preds_list):
                         tiles_processed += 1
+                        core_x1, core_y1, core_x2, core_y2 = meta_item["core"]
+                        px1, py1, px2, py2 = meta_item["pad"]
+
                         c_boxes = preds.get("boxes", torch.empty((0, 4))).cpu().detach().numpy()
                         c_scores = preds.get("scores", torch.empty(0)).cpu().detach().numpy()
                         c_masks = preds.get("masks", None)
-                        if c_masks is not None: c_masks = c_masks.cpu().detach().numpy()
+                        if c_masks is not None:
+                            c_masks = c_masks.cpu().detach().numpy()
                         c_labels = preds.get("labels", torch.empty(0, dtype=torch.int64)).cpu().detach().numpy()
 
                         for i in range(len(c_scores)):
                             s = float(c_scores[i])
-                            if s < eff_threshold: continue
+                            if s < eff_threshold:
+                                continue
                             b = c_boxes[i]
                             bw, bh = float(b[2] - b[0]), float(b[3] - b[1])
-                            if min(bw, bh) < 4: continue
+                            if min(bw, bh) < 4:
+                                continue
 
                             w_m = bw * m_per_px
                             h_m = bh * m_per_px
-                            if min_size_m > 0 and (w_m < min_size_m or h_m < min_size_m): continue
-                            if max_size_m > 0 and (w_m > max_size_m or h_m > max_size_m): continue
+                            if min_size_m > 0 and (w_m < min_size_m or h_m < min_size_m):
+                                continue
+                            if max_size_m > 0 and (w_m > max_size_m or h_m > max_size_m):
+                                continue
 
-                            gx1, gy1, gx2, gy2 = float(b[0] + ox), float(b[1] + oy), float(b[2] + ox), float(b[3] + oy)
                             poly_shp = None
                             if c_masks is not None and i < len(c_masks):
                                 try:
@@ -3504,18 +3524,19 @@ async def predict_compat(data: Dict):
                                     contours, _ = cv2.findContours(m_binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                                     if contours:
                                         all_polys = []
-                                        tile_area = float(detector_tile_size * detector_tile_size)
+                                        tile_area = float(chip_size * chip_size)
                                         for c in contours:
                                             c_area = cv2.contourArea(c)
                                             # Filter out small noise and full-tile/desert boundary artifacts (matching BraeinAIMaskRCNN.py)
                                             if c_area < 6.0 or c_area >= 0.60 * tile_area:
                                                 continue
                                             c_approx = cv2.approxPolyDP(c, epsilon=1.0, closed=True)
-                                            pts = [(int(pt[0][0]) + ox, int(pt[0][1]) + oy) for pt in c_approx]
+                                            pts = [(float(pt[0][0]) + px1, float(pt[0][1]) + py1) for pt in c_approx]
                                             if len(pts) >= 3:
                                                 pts.append(pts[0])
                                                 p = ShapelyPolygon(pts)
-                                                if not p.is_valid: p = p.buffer(0)
+                                                if not p.is_valid:
+                                                    p = p.buffer(0)
                                                 if not p.is_empty and p.area >= 6.0:
                                                     all_polys.append(p)
                                         if all_polys:
@@ -3523,7 +3544,16 @@ async def predict_compat(data: Dict):
                                 except Exception:
                                     poly_shp = None
 
-                            if poly_shp is None: continue
+                            if poly_shp is None:
+                                continue
+
+                            # CENTROID FILTERING (ArcGIS Pro DLPK Seam Elimination):
+                            # A detection belongs to this tile IF AND ONLY IF its polygon centroid falls inside the core tile.
+                            # Because this tile has an extra padding margin on all sides, any building in the core is completely
+                            # surrounded by image context and is NEVER sliced at the core boundary!
+                            c_pt = poly_shp.centroid
+                            if not (core_x1 <= c_pt.x < core_x2 and core_y1 <= c_pt.y < core_y2):
+                                continue
 
                             lbl = int(c_labels[i]) if (c_labels is not None and i < len(c_labels)) else 1
                             c_name = _prediction_class_name(lbl, model_class_names)
@@ -3531,12 +3561,13 @@ async def predict_compat(data: Dict):
                                 c_name = default_model_label
 
                             raw_items.append({
-                                "b_px": [gx1, gy1, gx2, gy2],
+                                "b_px": [float(poly_shp.bounds[0]), float(poly_shp.bounds[1]), float(poly_shp.bounds[2]), float(poly_shp.bounds[3])],
                                 "score": s,
                                 "lbl": lbl,
                                 "c_name": c_name,
                                 "poly": poly_shp,
-                                "w_m": w_m, "h_m": h_m
+                                "w_m": w_m,
+                                "h_m": h_m
                             })
 
             # Standard Non-Maximum Suppression (NMS) to eliminate duplicate proposals
