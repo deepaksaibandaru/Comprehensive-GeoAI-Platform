@@ -2165,7 +2165,12 @@ function runPrediction() {
     const minSz = parseFloat(document.getElementById('predictMinSize')?.value || '2');
     const regularize = document.getElementById('predictRegularize') ? document.getElementById('predictRegularize').checked : false;
     const ps = document.getElementById('predictStatus'); if (ps) { ps.textContent = '⏳ Predicting...'; ps.style.color = '#fbbf24'; }
-    const curZoom = mapPredict.getZoom(), aoiBoundsPayload = (aoiBounds && aoiBounds.isValid()) ? { north: aoiBounds.getNorth(), south: aoiBounds.getSouth(), east: aoiBounds.getEast(), west: aoiBounds.getWest() } : null;
+    const activeAoi = (typeof aoiBounds !== 'undefined' && aoiBounds && typeof aoiBounds.isValid === 'function' && aoiBounds.isValid())
+        ? aoiBounds
+        : ((window.aoiBounds && typeof window.aoiBounds.isValid === 'function' && window.aoiBounds.isValid()) ? window.aoiBounds : null);
+
+    const curZoom = mapPredict.getZoom();
+    const aoiBoundsPayload = activeAoi ? { north: activeAoi.getNorth(), south: activeAoi.getSouth(), east: activeAoi.getEast(), west: activeAoi.getWest() } : null;
     const aoiGeometryPayload = window.predictAoiGeometry || null;
 
     const targetTileSizeVal = parseInt(document.getElementById('predictTileSize')?.value || '256', 10);
@@ -2211,7 +2216,15 @@ function runPrediction() {
     const modelZoom = (typeof trainingZoom === 'number' && trainingZoom > 0) ? trainingZoom : null;
     const modelTileSize = modelMeta.tile_size || 64;
     const impliedZoom = modelTileSize > 256 ? 18 : 17;
-    if (aoiBounds && aoiBounds.isValid()) { bounds = aoiBounds; } else { const current = mapPredict.getZoom(); if (modelZoom && current !== modelZoom) { mapPredict.setZoom(modelZoom, {animate:false}); } else if (modelTileSize > 256 && current < impliedZoom) { mapPredict.setZoom(impliedZoom, {animate:false}); } bounds = mapPredict.getBounds(); }
+    if (activeAoi) {
+        bounds = activeAoi;
+        addLog('info', `Running prediction on AOI boundary [${bounds.getSouth().toFixed(4)}, ${bounds.getWest().toFixed(4)}] to [${bounds.getNorth().toFixed(4)}, ${bounds.getEast().toFixed(4)}]...`);
+    } else {
+        const current = mapPredict.getZoom();
+        if (modelZoom && current !== modelZoom) { mapPredict.setZoom(modelZoom, {animate:false}); }
+        else if (modelTileSize > 256 && current < impliedZoom) { mapPredict.setZoom(impliedZoom, {animate:false}); }
+        bounds = mapPredict.getBounds();
+    }
 
     const targetResVal = parseFloat(document.getElementById('predictTargetResolution')?.value || '0.3');
     const targetRes = (targetResVal > 0 && Number.isFinite(targetResVal)) ? targetResVal : null;
@@ -2470,6 +2483,7 @@ function handlePredictShpUpload(event) {
         if (targetMap && latLngBounds.isValid()) {
             targetMap.fitBounds(latLngBounds, { padding: [30, 30], maxZoom: 19 });
         }
+        try { aoiBounds = latLngBounds; } catch(e) {}
         window.aoiBounds = latLngBounds;
         window.predictAoiGeometry = d.geojson.geometry;
 
@@ -2511,6 +2525,7 @@ function handlePredictShpUpload(event) {
 
 function clearPredictAoi() {
     if (predictDrawnItems) predictDrawnItems.clearLayers();
+    try { aoiBounds = null; } catch(e) {}
     window.aoiBounds = null;
     window.aoiLayer = null;
     window.predictAoiGeometry = null;

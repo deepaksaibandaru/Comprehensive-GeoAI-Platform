@@ -3807,6 +3807,7 @@ async def predict_compat(data: Dict):
                     final_items.append(cur)
 
             score_np = np.array([item["score"] for item in final_items], dtype=np.float32) if final_items else np.zeros((0,), dtype=np.float32)
+            print(f"[PREDICT] Detection: {len(raw_items)} raw candidates, {len(final_items)} retained after NMS", flush=True)
 
             west, east = float(bounds["west"]), float(bounds["east"])
             south, north = float(bounds["south"]), float(bounds["north"])
@@ -3919,6 +3920,8 @@ async def predict_compat(data: Dict):
 
         if aoi_clip_shape is not None and not aoi_clip_shape.is_empty:
             try:
+                # Buffer the AOI boundary slightly (~10m / 0.00010 deg) so edge buildings are never falsely dropped
+                aoi_test_shape = aoi_clip_shape.buffer(0.00010)
                 kept = []
                 for feat in features:
                     try:
@@ -3932,17 +3935,17 @@ async def predict_compat(data: Dict):
                             poly = unary_union([ShapelyPolygon(ring[0]) for ring in geom["coordinates"] if len(ring[0]) >= 3])
                         if not poly.is_valid:
                             poly = poly.buffer(0)
-                        # Keep complete object if it touches/intersects the AOI.
-                        # Never slice or chop buildings in half with the AOI boundary!
-                        if not poly.intersects(aoi_clip_shape):
+                        # Keep complete building if it touches or intersects the AOI boundary
+                        if not (poly.intersects(aoi_test_shape) or poly.centroid.intersects(aoi_test_shape)):
                             dropped += 1
                             continue
                         kept.append(feat)
                     except Exception:
                         dropped += 1
+                print(f"[PREDICT] AOI Boundary Filter: {len(kept)}/{len(features)} buildings inside AOI (dropped {dropped} outside)", flush=True)
                 features = kept
-            except Exception:
-                pass
+            except Exception as clip_err:
+                print(f"[PREDICT] AOI clipping error: {clip_err}", flush=True)
             
         # Clean RFC 7946 GeoJSON: no top-level crs property (standard requires EPSG:4326 without crs tag)
         geojson = {"type": "FeatureCollection", "features": features}

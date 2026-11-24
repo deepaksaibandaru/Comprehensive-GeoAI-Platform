@@ -889,7 +889,7 @@
         </div>
     </div>
 
-    <script src="/static/app.js?v=geoai-shp-aoi-20261124-v4"></script>
+    <script src="/static/app.js?v=geoai-shp-aoi-20261124-v5"></script>
     <script>
     // Direct global definition for shapefile upload & AOI management (bypasses browser caching)
     window.handlePredictShpUpload = function(event) {
@@ -965,6 +965,7 @@
             if (targetMap && latLngBounds.isValid()) {
                 targetMap.fitBounds(latLngBounds, { padding: [30, 30], maxZoom: 19 });
             }
+            try { if (typeof aoiBounds !== 'undefined') aoiBounds = latLngBounds; } catch(e) {}
             window.aoiBounds = latLngBounds;
             window.predictAoiGeometry = d.geojson.geometry;
 
@@ -1011,6 +1012,7 @@
         if (window.aoiLayer && typeof window.aoiLayer.remove === 'function') {
             window.aoiLayer.remove();
         }
+        try { if (typeof aoiBounds !== 'undefined') aoiBounds = null; } catch(e) {}
         window.aoiBounds = null;
         window.aoiLayer = null;
         window.predictAoiGeometry = null;
