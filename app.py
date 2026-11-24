@@ -3438,9 +3438,9 @@ async def predict_compat(data: Dict):
             full_tensor = TF.to_tensor(img_pil).to(device)
 
             # Direct whole-image inference:
-            # Whenever the image/AOI is within GPU capacity (<= 1536x1536), evaluate directly in ONE pass!
+            # Whenever the image/AOI is within GPU capacity (<= 2560x2560), evaluate directly in ONE pass!
             # This completely avoids slicing into chips, eliminating ALL chip borders, seam cuts, and tile slices!
-            MAX_DIRECT_DIM = 1536
+            MAX_DIRECT_DIM = 2560
             use_direct = (max(W, H) <= MAX_DIRECT_DIM)
 
             if use_direct:
@@ -3645,7 +3645,11 @@ async def predict_compat(data: Dict):
                         except Exception:
                             poly_iou = 0.0
 
-                    if box_iou > eff_nms or poly_iou > eff_nms:
+                    # For polygon instance segmentation:
+                    # Detections are duplicate only if their polygon masks genuinely overlap (poly_iou > eff_nms)
+                    # or if bounding boxes are nearly identical (box_iou > 0.70).
+                    # Do NOT eliminate separate adjacent buildings whose polygon footprints do not overlap!
+                    if poly_iou > eff_nms or box_iou > 0.70:
                         is_dup = True
                         break
 
