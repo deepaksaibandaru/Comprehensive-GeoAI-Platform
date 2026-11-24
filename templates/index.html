@@ -889,6 +889,113 @@
         </div>
     </div>
 
-    <script src="/static/app.js?v=geoai-model-label-fix-20261117-1"></script>
+    <script src="/static/app.js?v=geoai-shp-aoi-20261124-v2"></script>
+    <script>
+    // Direct global definition for shapefile upload & AOI management (bypasses browser caching)
+    window.handlePredictShpUpload = function(event) {
+        var file = event.target.files ? event.target.files[0] : null;
+        if (!file) return;
+
+        var btn = document.getElementById('btnUploadPredictShp');
+        var originalText = btn ? btn.innerHTML : '';
+        if (btn) {
+            btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Reading...';
+            btn.disabled = true;
+        }
+        var ps = document.getElementById('predictStatus');
+        if (ps) { ps.textContent = '⏳ Reading Shapefile AOI...'; ps.style.color = '#fbbf24'; }
+        if (typeof addLog === 'function') addLog('info', 'Reading shapefile "' + file.name + '"...');
+
+        var formData = new FormData();
+        formData.append('file', file);
+
+        fetch('/api/predict/upload_aoi_shapefile', {
+            method: 'POST',
+            body: formData
+        })
+        .then(function(r) { return r.json(); })
+        .then(function(d) {
+            if (!d.success) {
+                throw new Error(d.error || 'Failed to process shapefile');
+            }
+
+            if (window.predictDrawnItems) window.predictDrawnItems.clearLayers();
+
+            var aoiGeoLayer = L.geoJSON(d.geojson, {
+                style: {
+                    color: '#fbbf24',
+                    weight: 3,
+                    opacity: 0.95,
+                    fillColor: '#38bdf8',
+                    fillOpacity: 0.22,
+                    dashArray: '5, 5'
+                }
+            });
+            if (window.predictDrawnItems) window.predictDrawnItems.addLayer(aoiGeoLayer);
+            window.aoiLayer = aoiGeoLayer;
+
+            var b = d.bounds;
+            var latLngBounds = L.latLngBounds([[b.south, b.west], [b.north, b.east]]);
+            if (window.mapPredict && latLngBounds.isValid()) {
+                window.mapPredict.fitBounds(latLngBounds, { padding: [30, 30], maxZoom: 19 });
+            }
+            window.aoiBounds = latLngBounds;
+            window.predictAoiGeometry = d.geojson.geometry;
+
+            var card = document.getElementById('predictAoiCard');
+            var badge = document.getElementById('predictAoiBadge');
+            var clearBtn = document.getElementById('btnClearPredictAoi');
+            var nameEl = document.getElementById('predictAoiName');
+            var areaEl = document.getElementById('predictAoiArea');
+            var detEl = document.getElementById('predictAoiDetails');
+
+            if (card) card.style.display = 'block';
+            if (badge) badge.style.display = 'inline-block';
+            if (clearBtn) clearBtn.style.display = 'inline-block';
+            if (nameEl) nameEl.textContent = d.filename;
+            if (areaEl) areaEl.textContent = d.area_str || '';
+            if (detEl) {
+                detEl.textContent = d.feature_count + ' feature(s) • [' + b.south.toFixed(4) + ', ' + b.west.toFixed(4) + '] to [' + b.north.toFixed(4) + ', ' + b.east.toFixed(4) + ']';
+            }
+
+            var s = document.getElementById('predictStatusText');
+            if (s) s.textContent = '📍 AOI loaded from Shapefile (' + (d.area_str || '') + ') — click PREDICT';
+            if (ps) { ps.textContent = '✅ AOI Loaded (' + d.filename + ')'; ps.style.color = '#34d399'; }
+            if (typeof addLog === 'function') addLog('success', 'AOI loaded: ' + d.filename + ' (' + (d.area_str || '') + '). Click PREDICT to run.');
+        })
+        .catch(function(err) {
+            if (typeof addLog === 'function') addLog('error', 'Shapefile upload error: ' + err.message);
+            if (ps) { ps.textContent = '❌ ' + err.message; ps.style.color = '#f87171'; }
+            alert('Error loading Shapefile: ' + err.message);
+        })
+        .finally(function() {
+            if (btn) {
+                btn.innerHTML = originalText || '<i class="fas fa-file-upload"></i> Upload Shapefile';
+                btn.disabled = false;
+            }
+            event.target.value = '';
+        });
+    };
+
+    window.clearPredictAoi = function() {
+        if (window.predictDrawnItems) window.predictDrawnItems.clearLayers();
+        window.aoiBounds = null;
+        window.aoiLayer = null;
+        window.predictAoiGeometry = null;
+
+        var card = document.getElementById('predictAoiCard');
+        var badge = document.getElementById('predictAoiBadge');
+        var clearBtn = document.getElementById('btnClearPredictAoi');
+        if (card) card.style.display = 'none';
+        if (badge) badge.style.display = 'none';
+        if (clearBtn) clearBtn.style.display = 'none';
+
+        var s = document.getElementById('predictStatusText');
+        if (s) s.textContent = 'Pan to any region, or draw an AOI';
+        var ps = document.getElementById('predictStatus');
+        if (ps) { ps.textContent = 'Ready'; ps.style.color = '#94a3b8'; }
+        if (typeof addLog === 'function') addLog('info', 'Cleared AOI. Predict will evaluate current map view.');
+    };
+    </script>
 </body>
 </html>
