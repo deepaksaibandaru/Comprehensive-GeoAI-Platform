@@ -2229,17 +2229,16 @@ function runPrediction() {
     const targetResVal = parseFloat(document.getElementById('predictTargetResolution')?.value || '0.3');
     const targetRes = (targetResVal > 0 && Number.isFinite(targetResVal)) ? targetResVal : null;
 
-    let captureZoom = curZoom;
+    let captureZoom = Math.min(18, curZoom);
     if (targetRes && bounds) {
         const centerLat = (bounds.getNorth() + bounds.getSouth()) / 2.0;
         const cosLat = Math.max(0.1, Math.cos(centerLat * Math.PI / 180.0));
-        captureZoom = Math.max(15, Math.min(20, Math.round(Math.log2((156543.03392 * cosLat) / targetRes))));
+        captureZoom = Math.max(15, Math.min(18, Math.round(Math.log2((156543.03392 * cosLat) / targetRes))));
     }
 
     let detScale = 1.0;
     if (captureZoom === 17) detScale = 2.0;
-    if (captureZoom === 18) detScale = 1.5;
-    if (captureZoom >= 19) detScale = 1.0;
+    if (captureZoom >= 18) detScale = 1.0;
 
     fetch('/api/map/capture', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ bounds: {north: bounds.getNorth(), south: bounds.getSouth(), east: bounds.getEast(), west: bounds.getWest()}, zoom: captureZoom, target_resolution: targetRes, tile_size: targetTileSize, service_id: 'satellite', project_id: currentProjectId }) })
     .then(r => r.json()).then(cd => {

@@ -1306,12 +1306,17 @@ def capture_map_image(bounds: Dict, zoom: int, service_id: str = None, project_i
     def tile_x_to_lon(tx, z): return tx / (2 ** z) * 360.0 - 180.0
     def tile_y_to_lat(ty, z): return math.degrees(math.atan(math.sinh(math.pi - 2.0 * math.pi * ty / (2 ** z))))
     
+    # Cap maximum tile zoom to 18 (Esri World Imagery native zoom limit; requesting z=19 returns blank 2KB empty tiles)
+    max_native_z = int(service.get("max_native_zoom") or service.get("max_zoom") or 18)
+    if "arcgisonline" in str(tile_url).lower():
+        max_native_z = min(max_native_z, 18)
+
     # If target_resolution is specified in meters (e.g. 0.3m), automatically calculate the optimal tile zoom level
     if target_resolution and float(target_resolution) > 0:
         mid_lat = (north + south) / 2.0
         cos_lat = max(0.1, math.cos(math.radians(mid_lat)))
         calc_z = int(round(math.log2((156543.03392 * cos_lat) / float(target_resolution))))
-        calc_z = max(15, min(20, calc_z))
+        calc_z = max(15, min(max_native_z, calc_z))
         # Ensure the tile count fits within safe download budget (<= 256 tiles with threadpool)
         while calc_z > 15:
             xs = int(math.floor(lon_to_tile_x(west, calc_z)))
@@ -1321,7 +1326,9 @@ def capture_map_image(bounds: Dict, zoom: int, service_id: str = None, project_i
             if (xe - xs + 1) * (ye - ys + 1) <= 256:
                 break
             calc_z -= 1
-        zoom = calc_z
+        zoom = min(max_native_z, calc_z)
+    else:
+        zoom = min(max_native_z, max(15, int(zoom)))
 
     use_arcgis = bool(service.get("upstream")) or str(tile_url).startswith("/api/basemap/")
     if use_arcgis:
@@ -3734,7 +3741,10 @@ async def predict_compat(data: Dict):
                                     poly_shp = None
 
                             if poly_shp is None:
-                                continue
+                                # Fallback to bounding box polygon if mask contour was empty
+                                b = c_boxes[i]
+                                bx1, by1, bx2, by2 = float(b[0]) + px1, float(b[1]) + py1, float(b[2]) + px1, float(b[3]) + py1
+                                poly_shp = box(bx1, by1, bx2, by2)
 
                             # CENTROID FILTERING (ArcGIS Pro DLPK Seam Elimination):
                             # A detection belongs to this tile IF AND ONLY IF its polygon centroid falls inside the core tile.
