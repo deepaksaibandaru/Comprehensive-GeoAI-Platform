@@ -889,7 +889,7 @@
         </div>
     </div>
 
-    <script src="/static/app.js?v=geoai-shp-aoi-20261124-v3"></script>
+    <script src="/static/app.js?v=geoai-shp-aoi-20261124-v4"></script>
     <script>
     // Direct global definition for shapefile upload & AOI management (bypasses browser caching)
     window.handlePredictShpUpload = function(event) {
@@ -931,8 +931,6 @@
                 throw new Error(d.error || 'Failed to process shapefile');
             }
 
-            if (window.predictDrawnItems) window.predictDrawnItems.clearLayers();
-
             var aoiGeoLayer = L.geoJSON(d.geojson, {
                 style: {
                     color: '#fbbf24',
@@ -943,13 +941,29 @@
                     dashArray: '5, 5'
                 }
             });
-            if (window.predictDrawnItems) window.predictDrawnItems.addLayer(aoiGeoLayer);
+
+            var targetMap = (typeof mapPredict !== 'undefined' && mapPredict && typeof mapPredict.fitBounds === 'function')
+                ? mapPredict
+                : (window.predictMap && typeof window.predictMap.fitBounds === 'function'
+                    ? window.predictMap
+                    : (window.mapPredictInstance && typeof window.mapPredictInstance.fitBounds === 'function' ? window.mapPredictInstance : null));
+
+            var drawnGroup = (typeof predictDrawnItems !== 'undefined' && predictDrawnItems && typeof predictDrawnItems.clearLayers === 'function')
+                ? predictDrawnItems
+                : (window.predictDrawnItems && typeof window.predictDrawnItems.clearLayers === 'function' ? window.predictDrawnItems : null);
+
+            if (drawnGroup) {
+                drawnGroup.clearLayers();
+                drawnGroup.addLayer(aoiGeoLayer);
+            } else if (targetMap) {
+                aoiGeoLayer.addTo(targetMap);
+            }
             window.aoiLayer = aoiGeoLayer;
 
             var b = d.bounds;
             var latLngBounds = L.latLngBounds([[b.south, b.west], [b.north, b.east]]);
-            if (window.mapPredict && latLngBounds.isValid()) {
-                window.mapPredict.fitBounds(latLngBounds, { padding: [30, 30], maxZoom: 19 });
+            if (targetMap && latLngBounds.isValid()) {
+                targetMap.fitBounds(latLngBounds, { padding: [30, 30], maxZoom: 19 });
             }
             window.aoiBounds = latLngBounds;
             window.predictAoiGeometry = d.geojson.geometry;
@@ -990,7 +1004,13 @@
     };
 
     window.clearPredictAoi = function() {
-        if (window.predictDrawnItems) window.predictDrawnItems.clearLayers();
+        var drawnGroup = (typeof predictDrawnItems !== 'undefined' && predictDrawnItems && typeof predictDrawnItems.clearLayers === 'function')
+            ? predictDrawnItems
+            : (window.predictDrawnItems && typeof window.predictDrawnItems.clearLayers === 'function' ? window.predictDrawnItems : null);
+        if (drawnGroup) drawnGroup.clearLayers();
+        if (window.aoiLayer && typeof window.aoiLayer.remove === 'function') {
+            window.aoiLayer.remove();
+        }
         window.aoiBounds = null;
         window.aoiLayer = null;
         window.predictAoiGeometry = null;

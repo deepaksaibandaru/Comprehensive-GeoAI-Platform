@@ -366,8 +366,11 @@ function initPredictMapDirect() {
     try {
         c.innerHTML = '';
         mapPredict = L.map('mapPredict', {center: [25.0, 55.06], zoom: 12, preferCanvas: true});
+        window.predictMap = mapPredict;
+        window.mapPredictInstance = mapPredict;
         currentPredictTileLayer = basemapLayer(); if (currentPredictTileLayer) currentPredictTileLayer.addTo(mapPredict); else showBasemapBlocked(c);
         predictDrawnItems = L.featureGroup().addTo(mapPredict);
+        window.predictDrawnItems = predictDrawnItems;
         predictDrawControl = new L.Control.Draw({ position: 'topright', draw: { polygon: {allowIntersection: false, shapeOptions:{color:'#fbbf24',weight:3,fillOpacity:0.3}}, rectangle: {shapeOptions:{color:'#60a5fa',weight:3,fillOpacity:0.3}}, circle: {shapeOptions:{color:'#34d399',weight:3,fillOpacity:0.3}}, polyline: false, marker: false, circlemarker: false }, edit: {featureGroup: predictDrawnItems, remove: true} });
         mapPredict.addControl(predictDrawControl);
         mapPredict.on(L.Draw.Event.CREATED, function(ev) { predictDrawnItems.clearLayers(); predictDrawnItems.addLayer(ev.layer); aoiLayer = ev.layer; const b = ev.layer.getBounds(); if (b.isValid()) { aoiBounds = b; const s = document.getElementById('predictStatusText'); if (s) s.textContent = '📍 AOI set — click PREDICT'; } });
@@ -2430,9 +2433,6 @@ function handlePredictShpUpload(event) {
             throw new Error(d.error || 'Failed to process shapefile');
         }
 
-        // Clear existing predict drawn items
-        if (predictDrawnItems) predictDrawnItems.clearLayers();
-
         // Add AOI GeoJSON layer to mapPredict
         const aoiGeoLayer = L.geoJSON(d.geojson, {
             style: {
@@ -2444,14 +2444,31 @@ function handlePredictShpUpload(event) {
                 dashArray: '5, 5'
             }
         });
-        if (predictDrawnItems) predictDrawnItems.addLayer(aoiGeoLayer);
+
+        const targetMap = (typeof mapPredict !== 'undefined' && mapPredict && typeof mapPredict.fitBounds === 'function')
+            ? mapPredict
+            : (window.predictMap && typeof window.predictMap.fitBounds === 'function'
+                ? window.predictMap
+                : (window.mapPredictInstance && typeof window.mapPredictInstance.fitBounds === 'function' ? window.mapPredictInstance : null));
+
+        const drawnGroup = (typeof predictDrawnItems !== 'undefined' && predictDrawnItems && typeof predictDrawnItems.clearLayers === 'function')
+            ? predictDrawnItems
+            : (window.predictDrawnItems && typeof window.predictDrawnItems.clearLayers === 'function' ? window.predictDrawnItems : null);
+
+        if (drawnGroup) {
+            drawnGroup.clearLayers();
+            drawnGroup.addLayer(aoiGeoLayer);
+        } else if (targetMap) {
+            aoiGeoLayer.addTo(targetMap);
+        }
         aoiLayer = aoiGeoLayer;
+        window.aoiLayer = aoiGeoLayer;
 
         // Zoom to AOI bounds
         const b = d.bounds;
         const latLngBounds = L.latLngBounds([[b.south, b.west], [b.north, b.east]]);
-        if (mapPredict && latLngBounds.isValid()) {
-            mapPredict.fitBounds(latLngBounds, { padding: [30, 30], maxZoom: 19 });
+        if (targetMap && latLngBounds.isValid()) {
+            targetMap.fitBounds(latLngBounds, { padding: [30, 30], maxZoom: 19 });
         }
         window.aoiBounds = latLngBounds;
         window.predictAoiGeometry = d.geojson.geometry;
