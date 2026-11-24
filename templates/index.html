@@ -724,7 +724,7 @@
                                     By default, PREDICT runs on the current view. Upload a <strong>Shapefile</strong> or draw an AOI on the map to automatically fetch, clip, and predict for that exact boundary.
                                 </div>
                                 <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
-                                    <input type="file" id="predictShpUploadInput" accept=".zip,.shp,.geojson,.json,.kml" style="display:none;" onchange="handlePredictShpUpload(event)">
+                                    <input type="file" id="predictShpUploadInput" accept=".zip,.shp,.shx,.dbf,.prj,.cpg,.geojson,.json,.kml" multiple style="display:none;" onchange="handlePredictShpUpload(event)">
                                     <button type="button" class="btn btn-sm btn-info" id="btnUploadPredictShp" onclick="document.getElementById('predictShpUploadInput').click()" style="display:flex;align-items:center;gap:5px;font-size:11px;padding:4px 9px;border-radius:4px;background:#0284c7;border:1px solid #38bdf8;color:#fff;cursor:pointer;" title="Upload ESRI Shapefile bundle (.zip) or .shp">
                                         <i class="fas fa-file-upload"></i> Upload Shapefile
                                     </button>
@@ -889,12 +889,12 @@
         </div>
     </div>
 
-    <script src="/static/app.js?v=geoai-shp-aoi-20261124-v2"></script>
+    <script src="/static/app.js?v=geoai-shp-aoi-20261124-v3"></script>
     <script>
     // Direct global definition for shapefile upload & AOI management (bypasses browser caching)
     window.handlePredictShpUpload = function(event) {
-        var file = event.target.files ? event.target.files[0] : null;
-        if (!file) return;
+        var files = event.target.files;
+        if (!files || files.length === 0) return;
 
         var btn = document.getElementById('btnUploadPredictShp');
         var originalText = btn ? btn.innerHTML : '';
@@ -904,10 +904,22 @@
         }
         var ps = document.getElementById('predictStatus');
         if (ps) { ps.textContent = '⏳ Reading Shapefile AOI...'; ps.style.color = '#fbbf24'; }
-        if (typeof addLog === 'function') addLog('info', 'Reading shapefile "' + file.name + '"...');
+
+        var primaryName = files[0].name;
+        for (var i = 0; i < files.length; i++) {
+            var fn = files[i].name.toLowerCase();
+            if (fn.endsWith('.shp') || fn.endsWith('.geojson') || fn.endsWith('.zip')) {
+                primaryName = files[i].name;
+                break;
+            }
+        }
+        if (typeof addLog === 'function') addLog('info', 'Reading ' + files.length + ' file(s) for AOI (' + primaryName + ')...');
 
         var formData = new FormData();
-        formData.append('file', file);
+        for (var i = 0; i < files.length; i++) {
+            formData.append('files', files[i]);
+        }
+        formData.append('file', files[0]);
 
         fetch('/api/predict/upload_aoi_shapefile', {
             method: 'POST',

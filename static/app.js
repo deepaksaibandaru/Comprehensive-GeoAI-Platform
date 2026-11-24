@@ -2392,8 +2392,8 @@ function loadUploadedDatasets() { fetch('/api/uploaded_datasets').then(r => r.js
 function deleteDataset(sid) { if (!confirm('Delete session?')) return; fetch('/api/uploaded_datasets/' + sid, {method:'DELETE'}).then(r => r.json()).then(d => { if (d.success) loadUploadedDatasets(); }); }
 
 function handlePredictShpUpload(event) {
-    const file = event.target.files ? event.target.files[0] : null;
-    if (!file) return;
+    const files = event.target.files;
+    if (!files || files.length === 0) return;
 
     const btn = document.getElementById('btnUploadPredictShp');
     const originalText = btn ? btn.innerHTML : '';
@@ -2403,10 +2403,22 @@ function handlePredictShpUpload(event) {
     }
     const ps = document.getElementById('predictStatus');
     if (ps) { ps.textContent = '⏳ Reading Shapefile AOI...'; ps.style.color = '#fbbf24'; }
-    addLog('info', `Reading shapefile "${file.name}"...`);
+
+    let primaryName = files[0].name;
+    for (let i = 0; i < files.length; i++) {
+        const fn = files[i].name.toLowerCase();
+        if (fn.endsWith('.shp') || fn.endsWith('.geojson') || fn.endsWith('.zip')) {
+            primaryName = files[i].name;
+            break;
+        }
+    }
+    addLog('info', `Reading AOI file(s) (${files.length} file(s), primary: "${primaryName}")...`);
 
     const formData = new FormData();
-    formData.append('file', file);
+    for (let i = 0; i < files.length; i++) {
+        formData.append('files', files[i]);
+    }
+    formData.append('file', files[0]);
 
     fetch('/api/predict/upload_aoi_shapefile', {
         method: 'POST',

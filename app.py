@@ -48,6 +48,13 @@ import geopandas as gpd
 from shapely.geometry import Polygon as ShapelyPolygon, box, mapping
 from shapely.ops import unary_union
 
+os.environ['SHAPE_RESTORE_SHX'] = 'YES'
+try:
+    import pyogrio
+    pyogrio.set_gdal_config_options({'SHAPE_RESTORE_SHX': 'YES'})
+except Exception:
+    pass
+
 try:
     import rasterio
     from rasterio.transform import from_bounds as rio_from_bounds
@@ -3292,66 +3299,132 @@ def smooth_seam_cut(poly, internal_seams, max_dist=2.5, min_seg_len=12.0):
 
 
 @app.post("/api/predict/upload_aoi_shapefile", dependencies=[Depends(require_api_key)])
-async def api_predict_upload_aoi_shapefile(file: UploadFile = File(...)):
+async def api_predict_upload_aoi_shapefile(files: Optional[List[UploadFile]] = File(None), file: Optional[UploadFile] = File(None)):
     """
-    Accept an uploaded Shapefile (.zip bundle or .shp), GeoJSON, or KML,
-    reproject to WGS84 (EPSG:4326), extract its boundary polygon & bounding box,
-    and return GeoJSON for interactive display & automatic satellite capture.
+    Accept an uploaded Shapefile (.zip bundle, single .shp, or multi-file .shp/.shx/.dbf/.prj),
+    GeoJSON, or KML, reproject to WGS84 (EPSG:4326), extract boundary and bounding box,
+    and return GeoJSON for interactive display and automatic satellite capture.
     """
     try:
-        filename = os.path.basename(file.filename or "").strip()
-        if not filename:
+        upload_list = []
+        if files:
+            upload_list.extend([f for f in files if f.filename])
+        if file and file.filename and file not in upload_list:
+            upload_list.append(file)
+
+        if not upload_list:
             return JSONResponse({"success": False, "error": "No file uploaded"}, status_code=400)
 
         upload_dir = os.path.join("uploads", "aoi_shapefiles")
         os.makedirs(upload_dir, exist_ok=True)
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        safe_name = re.sub(r"[^a-zA-Z0-9_.-]", "_", filename)
-        file_path = os.path.join(upload_dir, f"{stamp}_{safe_name}")
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:19]
+        session_dir = os.path.join(upload_dir, f"session_{stamp}")
+        os.makedirs(session_dir, exist_ok=True)
 
-        content = await file.read()
-        with open(file_path, "wb") as f:
-            f.write(content)
+        # Make sure GDAL/pyogrio config automatically restores missing SHX
+        os.environ["SHAPE_RESTORE_SHX"] = "YES"
+        try:
+            import pyogrio
+            pyogrio.set_gdal_config_options({"SHAPE_RESTORE_SHX": "YES"})
+        except Exception:
+            pass
+
+        primary_name = "AOI_Boundary"
+        saved_files = []
+        has_zip = False
+        has_shp = False
+        has_geojson = False
+
+        for f in upload_list:
+            orig_name = os.path.basename(f.filename or "").strip()
+            if not orig_name:
+                continue
+            ext = os.path.splitext(orig_name)[1].lower()
+            content_bytes = await f.read()
+
+            if ext == ".zip":
+                has_zip = True
+                primary_name = orig_name
+                zip_path = os.path.join(session_dir, f"bundle_{stamp}.zip")
+                with open(zip_path, "wb") as out:
+                    out.write(content_bytes)
+                extract_dir = os.path.join(session_dir, "unzipped")
+                os.makedirs(extract_dir, exist_ok=True)
+                with zipfile.ZipFile(zip_path, "r") as z:
+                    z.extractall(extract_dir)
+            else:
+                # Standardize stem to 'aoi' so companion files (.shp, .shx, .dbf, .prj, .cpg) match seamlessly
+                # regardless of Arabic/Unicode characters in the original filenames
+                dest_filename = f"aoi{ext}" if ext in [".shp", ".shx", ".dbf", ".prj", ".cpg", ".qpj", ".sbn", ".sbx"] else f"aoi_{stamp}{ext}"
+                dest_path = os.path.join(session_dir, dest_filename)
+                with open(dest_path, "wb") as out:
+                    out.write(content_bytes)
+                saved_files.append((orig_name, dest_path, ext))
+                if ext == ".shp":
+                    has_shp = True
+                    primary_name = orig_name
+                elif ext in [".geojson", ".json"] and not has_shp:
+                    has_geojson = True
+                    primary_name = orig_name
+                elif ext in [".kml", ".gpkg"] and not has_shp and not has_geojson:
+                    primary_name = orig_name
 
         gdf = None
-        lower_name = filename.lower()
-        if lower_name.endswith(".zip"):
-            extract_dir = os.path.join(upload_dir, f"unzipped_{stamp}")
-            os.makedirs(extract_dir, exist_ok=True)
-            with zipfile.ZipFile(file_path, "r") as z:
-                z.extractall(extract_dir)
+        if has_zip:
             shp_files = []
-            for root, _, files in os.walk(extract_dir):
-                for fn in files:
+            for root, _, fnames in os.walk(os.path.join(session_dir, "unzipped")):
+                for fn in fnames:
                     if fn.lower().endswith(".shp"):
                         shp_files.append(os.path.join(root, fn))
             if shp_files:
-                gdf = gpd.read_file(shp_files[0])
+                try:
+                    gdf = gpd.read_file(shp_files[0])
+                except Exception:
+                    import fiona
+                    with fiona.Env(SHAPE_RESTORE_SHX="YES"):
+                        gdf = gpd.read_file(shp_files[0], engine="fiona")
             else:
-                json_files = [os.path.join(root, fn) for root, _, files in os.walk(extract_dir) for fn in files if fn.lower().endswith((".geojson", ".json"))]
-                if json_files:
-                    gdf = gpd.read_file(json_files[0])
-                else:
-                    return JSONResponse({"success": False, "error": "No .shp or .geojson found inside uploaded zip file"}, status_code=400)
-        elif lower_name.endswith((".geojson", ".json", ".kml")):
-            gdf = gpd.read_file(file_path)
-        elif lower_name.endswith(".shp"):
-            gdf = gpd.read_file(file_path)
+                geojsons = [os.path.join(root, fn) for root, _, fnames in os.walk(os.path.join(session_dir, "unzipped")) for fn in fnames if fn.lower().endswith((".geojson", ".json"))]
+                if geojsons:
+                    gdf = gpd.read_file(geojsons[0])
+        elif has_shp:
+            shp_path = os.path.join(session_dir, "aoi.shp")
+            try:
+                gdf = gpd.read_file(shp_path)
+            except Exception:
+                import fiona
+                with fiona.Env(SHAPE_RESTORE_SHX="YES"):
+                    gdf = gpd.read_file(shp_path, engine="fiona")
+        elif has_geojson:
+            gj_path = next(p for fn, p, ext in saved_files if ext in [".geojson", ".json"])
+            gdf = gpd.read_file(gj_path)
         else:
-            return JSONResponse({"success": False, "error": "Please upload a .zip (Shapefile bundle), .shp, or .geojson file"}, status_code=400)
+            for fn, p, ext in saved_files:
+                if ext in [".kml", ".gpkg"]:
+                    gdf = gpd.read_file(p)
+                    primary_name = fn
+                    break
 
         if gdf is None or gdf.empty:
-            return JSONResponse({"success": False, "error": "Uploaded shapefile contains no features"}, status_code=400)
+            return JSONResponse({"success": False, "error": "Uploaded shapefile or GeoJSON contains no features"}, status_code=400)
 
         # Reproject to WGS84 (EPSG:4326) if necessary
         if gdf.crs is not None:
             if gdf.crs.to_string() != "EPSG:4326":
                 gdf = gdf.to_crs("EPSG:4326")
         else:
-            gdf = gdf.set_crs("EPSG:4326")
+            minx, miny, maxx, maxy = gdf.total_bounds
+            if -180.0 <= minx <= 180.0 and -90.0 <= miny <= 90.0 and -180.0 <= maxx <= 180.0 and -90.0 <= maxy <= 90.0:
+                gdf = gdf.set_crs("EPSG:4326")
+            else:
+                gdf = gdf.set_crs("EPSG:3857").to_crs("EPSG:4326")
 
         # Unified AOI shape
-        aoi_union = gdf.unary_union
+        try:
+            aoi_union = gdf.union_all()
+        except Exception:
+            aoi_union = gdf.unary_union
+
         if not aoi_union.is_valid:
             aoi_union = aoi_union.buffer(0)
 
@@ -3370,7 +3443,10 @@ async def api_predict_upload_aoi_shapefile(file: UploadFile = File(...)):
             utm_zone = int((center_lon + 180) / 6) + 1
             epsg_code = 32600 + utm_zone if center_lat >= 0 else 32700 + utm_zone
             gdf_utm = gdf.to_crs(f"EPSG:{epsg_code}")
-            area_m2 = float(gdf_utm.unary_union.area)
+            try:
+                area_m2 = float(gdf_utm.union_all().area)
+            except Exception:
+                area_m2 = float(gdf_utm.unary_union.area)
             if area_m2 >= 1_000_000:
                 area_str = f"{area_m2 / 1_000_000:.2f} km²"
             elif area_m2 >= 10_000:
@@ -3385,13 +3461,13 @@ async def api_predict_upload_aoi_shapefile(file: UploadFile = File(...)):
 
         return JSONResponse({
             "success": True,
-            "filename": filename,
+            "filename": primary_name,
             "bounds": bounds,
             "geojson": {
                 "type": "Feature",
                 "geometry": aoi_geojson,
                 "properties": {
-                    "name": filename,
+                    "name": primary_name,
                     "area_str": area_str,
                     "feature_count": len(gdf)
                 }
