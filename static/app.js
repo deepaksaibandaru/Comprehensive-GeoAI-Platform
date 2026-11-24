@@ -2157,8 +2157,8 @@ function runPrediction() {
     if (!mapPredict) { addLog('error','Predict map not ready'); return; }
 
     const thr = parseFloat(document.getElementById('predictThreshold')?.value || '0.35');
-    const nmsThr = parseFloat(document.getElementById('predictNmsThreshold')?.value || '0.20');
-    const maxSz = parseFloat(document.getElementById('predictMaxSize')?.value || '65');
+    const nmsThr = parseFloat(document.getElementById('predictNmsThreshold')?.value || '0.45');
+    const maxSz = parseFloat(document.getElementById('predictMaxSize')?.value || '150');
     const minSz = parseFloat(document.getElementById('predictMinSize')?.value || '2');
     const regularize = document.getElementById('predictRegularize') ? document.getElementById('predictRegularize').checked : false;
     const ps = document.getElementById('predictStatus'); if (ps) { ps.textContent = '⏳ Predicting...'; ps.style.color = '#fbbf24'; }
