@@ -2240,7 +2240,15 @@ function runPrediction() {
     if (captureZoom === 17) detScale = 2.0;
     if (captureZoom >= 18) detScale = 1.0;
 
-    fetch('/api/map/capture', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ bounds: {north: bounds.getNorth(), south: bounds.getSouth(), east: bounds.getEast(), west: bounds.getWest()}, zoom: captureZoom, target_resolution: targetRes, tile_size: targetTileSize, service_id: 'satellite', project_id: currentProjectId }) })
+    // Expand capture bounds slightly when AOI is active so edge tiles get real imagery context padding (like ArcGIS Pro)
+    const capPadDeg = activeAoi ? 0.0007 : 0.0;
+    const capBounds = {
+        north: bounds.getNorth() + capPadDeg,
+        south: bounds.getSouth() - capPadDeg,
+        east: bounds.getEast() + capPadDeg,
+        west: bounds.getWest() - capPadDeg
+    };
+    fetch('/api/map/capture', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ bounds: capBounds, zoom: captureZoom, target_resolution: targetRes, tile_size: targetTileSize, service_id: 'satellite', project_id: currentProjectId }) })
     .then(r => r.json()).then(cd => {
         if (!cd.success) throw new Error(cd.error || 'capture failed');
         if (cd.bounds?.gsd && cd.bounds.gsd > 0.8) {

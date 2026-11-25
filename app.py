@@ -3654,11 +3654,11 @@ async def predict_compat(data: Dict):
             gx_list = list(range(0, W, core_size))
             gy_list = list(range(0, H, core_size))
 
-            # Pad full image symmetrically by `padding` on all 4 sides (plus tail margin)
+            # Pad full image symmetrically by `padding` on all 4 sides with constant 0 (avoids replicate stripe artifacts)
             tail_pad_r = max(0, (gx_list[-1] + core_size + padding) - W) if gx_list else padding
             tail_pad_b = max(0, (gy_list[-1] + core_size + padding) - H) if gy_list else padding
             padded_tensor = torch.nn.functional.pad(
-                full_tensor, (padding, max(padding, tail_pad_r), padding, max(padding, tail_pad_b)), mode="replicate"
+                full_tensor, (padding, max(padding, tail_pad_r), padding, max(padding, tail_pad_b)), mode="constant", value=0.0
             )
 
             chips_meta = []
@@ -3772,8 +3772,8 @@ async def predict_compat(data: Dict):
                                 "h_m": h_m
                             })
 
-            # Non Maximum Suppression matching ArcGIS Pro (Max Overlap Ratio = inter / min(areaA, areaB))
-            # Removes intra-chip overlapping Mask R-CNN proposals while keeping highest-confidence polygon.
+            # Non Maximum Suppression matching ArcGIS Pro (IoU = intersection / union)
+            # Removes duplicate overlapping masks on the same building without letting one large mask delete smaller houses.
             raw_items.sort(key=lambda x: x["score"], reverse=True)
             final_items = []
             max_overlap_ratio = max(0.05, min(0.90, nms_threshold))
@@ -3788,9 +3788,9 @@ async def predict_compat(data: Dict):
                     if cur["poly"].intersects(prev["poly"]):
                         try:
                             p_inter = cur["poly"].intersection(prev["poly"]).area
-                            min_area_pair = max(1.0, min(cur["poly"].area, prev["poly"].area))
-                            overlap_ratio = p_inter / min_area_pair
-                            if overlap_ratio > max_overlap_ratio:
+                            p_union = cur["poly"].area + prev["poly"].area - p_inter
+                            poly_iou = p_inter / max(1.0, p_union)
+                            if poly_iou > max_overlap_ratio:
                                 is_dup = True
                                 break
                         except Exception:
