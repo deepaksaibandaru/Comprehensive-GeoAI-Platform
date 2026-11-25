@@ -675,6 +675,10 @@ def load_checkpoint(model_path, device, requested_num_classes=None):
         meta["extra_info"] = dict(meta.get("extra_info") or {})
         meta["extra_info"]["emd_metadata_available"] = True
         meta["extra_info"]["emd_model_type"] = emd_meta.get("ModelType") or emd_meta.get("model_type")
+        emd_tile = emd_meta.get("ImageHeight") or emd_meta.get("ImageWidth")
+        if emd_tile and int(emd_tile) >= 64:
+            meta["tile_size"] = int(emd_tile)
+            meta["target_size"] = int(emd_tile)
     elif meta.get("model_name") in ("model", None, ""):
         meta["model_name"] = os.path.splitext(os.path.basename(model_path))[0]
 
@@ -3671,6 +3675,8 @@ async def predict_compat(data: Dict):
             if hasattr(model, "transform"):
                 model.transform.min_size = (chip_size,)
                 model.transform.max_size = max(chip_size, 1024)
+            if hasattr(model, "roi_heads") and hasattr(model.roi_heads, "detections_per_img"):
+                model.roi_heads.detections_per_img = max(300, int(model.roi_heads.detections_per_img))
 
             batch_size = 4
             with torch.inference_mode():
