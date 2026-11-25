@@ -680,13 +680,20 @@
                                 <div class="section-title">⚙️ PREDICTION SETTINGS</div>
                                 <div class="config-row" style="align-items:center;">
                                     <label for="predictThreshold">Confidence:</label>
-                                    <input type="range" id="predictThreshold" min="0.05" max="0.95" step="0.05" value="0.35" style="flex:1;" oninput="document.getElementById('predictThresholdVal').textContent=this.value">
-                                    <span id="predictThresholdVal" style="color:#4ecdc4;font-weight:700;min-width:32px;font-size:11px;text-align:right;">0.35</span>
+                                    <input type="range" id="predictThreshold" min="0.05" max="0.95" step="0.05" value="0.50" style="flex:1;" oninput="document.getElementById('predictThresholdVal').textContent=this.value">
+                                    <span id="predictThresholdVal" style="color:#4ecdc4;font-weight:700;min-width:32px;font-size:11px;text-align:right;">0.50</span>
+                                </div>
+                                <div class="config-row" style="align-items:center;margin-top:6px;">
+                                    <label for="predictNmsThreshold">Max Overlap Ratio:</label>
+                                    <div style="display:flex;align-items:center;gap:4px;">
+                                        <input type="number" id="predictNmsThreshold" value="0.10" min="0.00" max="0.90" step="0.05" style="width:65px;">
+                                        <span style="font-size:9.5px;color:#64748b;">(NMS)</span>
+                                    </div>
                                 </div>
                                 <div class="config-row" style="align-items:center;margin-top:6px;">
                                     <label for="predictMaxSize">Max Size (m):</label>
                                     <div style="display:flex;align-items:center;gap:4px;">
-                                        <input type="number" id="predictMaxSize" value="65" min="0" max="1000" step="5" style="width:65px;">
+                                        <input type="number" id="predictMaxSize" value="0" min="0" max="1000" step="5" style="width:65px;">
                                         <span style="color:#4ecdc4;font-weight:700;font-size:11px;">m</span>
                                         <span style="font-size:9.5px;color:#64748b;">(0=all)</span>
                                     </div>
@@ -694,13 +701,11 @@
                                 <div class="config-row" style="align-items:center;margin-top:6px;">
                                     <label for="predictMinSize">Min Size (m):</label>
                                     <div style="display:flex;align-items:center;gap:4px;">
-                                        <input type="number" id="predictMinSize" value="2" min="0" max="50" step="1" style="width:65px;">
+                                        <input type="number" id="predictMinSize" value="0" min="0" max="50" step="1" style="width:65px;">
                                         <span style="color:#4ecdc4;font-weight:700;font-size:11px;">m</span>
                                         <span style="font-size:9.5px;color:#64748b;">(0=all)</span>
                                     </div>
                                 </div>
-                                <!-- Hidden: NMS and Regularize not used in ArcGIS Pro reference pipeline -->
-                                <input type="hidden" id="predictNmsThreshold" value="0.30">
                                 <input type="hidden" id="predictRegularize" value="">
                             </div>
                             <div class="config-section" id="predictAoiSection">
@@ -877,7 +882,7 @@
         </div>
     </div>
 
-    <script src="/static/app.js?v=geoai-arcgis-match-20261125-v1"></script>
+    <script src="/static/app.js?v=geoai-arcgis-match-20261125-v2"></script>
     <script>
     // Direct global definition for shapefile upload & AOI management (bypasses browser caching)
     window.handlePredictShpUpload = function(event) {
