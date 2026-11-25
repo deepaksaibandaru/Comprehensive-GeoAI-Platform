@@ -3805,7 +3805,8 @@ async def predict_compat(data: Dict):
                             p_inter = cur["poly"].intersection(prev["poly"]).area
                             p_union = cur["poly"].area + prev["poly"].area - p_inter
                             poly_iou = p_inter / max(1.0, p_union)
-                            if poly_iou > max_overlap_ratio:
+                            containment = p_inter / max(1.0, min(cur["poly"].area, prev["poly"].area))
+                            if poly_iou > max_overlap_ratio or containment > 0.70:
                                 is_dup = True
                                 break
                         except Exception:
@@ -3928,8 +3929,8 @@ async def predict_compat(data: Dict):
 
         if aoi_clip_shape is not None and not aoi_clip_shape.is_empty:
             try:
-                # Buffer the AOI boundary slightly (~10m / 0.00010 deg) so edge buildings are never falsely dropped
-                aoi_test_shape = aoi_clip_shape.buffer(0.00010)
+                # Use exact AOI polygon boundary without artificial outward buffer
+                aoi_test_shape = aoi_clip_shape
                 kept = []
                 for feat in features:
                     try:
