@@ -3765,7 +3765,14 @@ async def predict_compat(data: Dict):
                                     poly_shp = None
 
                             if poly_shp is None:
-                                continue
+                                # Only fall back to bounding boxes for box-only detectors (FasterRCNN/RetinaNet/SSD);
+                                # Mask R-CNN must never emit bounding-box squares when mask extraction is empty.
+                                if c_masks is None:
+                                    b = c_boxes[i]
+                                    bx1, by1, bx2, by2 = float(b[0]) + ox, float(b[1]) + oy, float(b[2]) + ox, float(b[3]) + oy
+                                    poly_shp = box(bx1, by1, bx2, by2)
+                                else:
+                                    continue
 
                             # Centroid-in-core filtering (deduplicates across tile seams)
                             c_pt = poly_shp.centroid
