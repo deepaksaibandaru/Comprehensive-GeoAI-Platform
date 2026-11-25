@@ -649,13 +649,13 @@
                                     </div>
                                 </div>
                                 <div class="config-row" style="margin-top:6px;gap:4px;flex-wrap:wrap;">
-                                    <button class="btn btn-xs" type="button" onclick="setPredictResolution(0.3)" style="background:#1e293b;border:1px solid #334155;color:#38bdf8;padding:2px 6px;border-radius:3px;font-size:10px;">0.3m (High-Res)</button>
-                                    <button class="btn btn-xs" type="button" onclick="setPredictResolution(0.5)" style="background:#1e293b;border:1px solid #334155;color:#94a3b8;padding:2px 6px;border-radius:3px;font-size:10px;">0.5m</button>
+                                    <button class="btn btn-xs" type="button" onclick="setPredictResolution(0.3)" style="background:#1e293b;border:1px solid #334155;color:#94a3b8;padding:2px 6px;border-radius:3px;font-size:10px;">0.3m (High-Res)</button>
+                                    <button class="btn btn-xs" type="button" onclick="setPredictResolution(0.5)" style="background:#1e293b;border:1px solid #38bdf8;color:#38bdf8;padding:2px 6px;border-radius:3px;font-size:10px;">0.5m</button>
                                     <button class="btn btn-xs" type="button" onclick="setPredictResolution(1.0)" style="background:#1e293b;border:1px solid #334155;color:#94a3b8;padding:2px 6px;border-radius:3px;font-size:10px;">1.0m</button>
                                     <button class="btn btn-xs" type="button" onclick="setPredictResolution(0)" style="background:#1e293b;border:1px solid #334155;color:#94a3b8;padding:2px 6px;border-radius:3px;font-size:10px;">Auto (Map)</button>
                                 </div>
                                 <div id="predictResHelper" style="font-size:10px;color:#94a3b8;line-height:1.45;margin-top:6px;">
-                                    Auto-captures tiles at <b id="predictResZoomBadge" style="color:#34d399;">Zoom 19 (~0.3m/px)</b> regardless of your screen zoom.
+                                    Auto-captures tiles at <b id="predictResZoomBadge" style="color:#34d399;">Zoom 18 (~0.50m/px)</b> regardless of your screen zoom.
                                 </div>
                             </div>
                             <div class="config-section">
@@ -882,7 +882,7 @@
         </div>
     </div>
 
-    <script src="/static/app.js?v=geoai-arcgis-match-20261125-v4"></script>
+    <script src="/static/app.js?v=geoai-arcgis-match-20261125-v5"></script>
     <script>
     // Direct global definition for shapefile upload & AOI management (bypasses browser caching)
     window.handlePredictShpUpload = function(event) {

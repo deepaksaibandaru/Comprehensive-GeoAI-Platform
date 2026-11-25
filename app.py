@@ -675,6 +675,8 @@ def load_checkpoint(model_path, device, requested_num_classes=None):
         meta["extra_info"] = dict(meta.get("extra_info") or {})
         meta["extra_info"]["emd_metadata_available"] = True
         meta["extra_info"]["emd_model_type"] = emd_meta.get("ModelType") or emd_meta.get("model_type")
+        meta["extra_info"]["emd_framework"] = emd_meta.get("Framework")
+        meta["extra_info"]["emd_resize_to"] = emd_meta.get("resize_to")
         emd_tile = emd_meta.get("ImageHeight") or emd_meta.get("ImageWidth")
         if emd_tile and int(emd_tile) >= 64:
             meta["tile_size"] = int(emd_tile)
@@ -2304,7 +2306,8 @@ async def evaluate_model(data: Dict):
                 "class_names": training_state.class_names,
                 "architecture": training_state.architecture,
                 "backbone": training_state.model_backbone,
-                "best_iou": training_state.best_map
+                "best_iou": training_state.best_map,
+                "extra_info": getattr(training_state, "extra_info", {}) or {}
             }
         else:
             model, meta = load_checkpoint(model_path, device)
@@ -2313,6 +2316,7 @@ async def evaluate_model(data: Dict):
             training_state.mode, training_state.class_names = meta.get("mode", "binary"), _normalise_model_class_names(meta)
             training_state.tile_size = int(meta.get("tile_size", meta.get("target_size", 256)))
             training_state.best_map = float(meta.get("best_iou", 0.0))
+            training_state.extra_info = meta.get("extra_info", {})
         model_type = normalize_model_type(meta.get("model_type", "unet")); is_native_detector = (hasattr(model, "roi_heads") or model_type in DETECTION_MODELS or model_type in INSTANCE_MODELS or meta.get("architecture") in ("MaskRCNN", "FasterRCNN"))
         sample_outputs = []
         if model_type == "yolo":
@@ -3017,6 +3021,7 @@ async def api_models_load(data: Dict):
         training_state.model_backbone, training_state.model_type, training_state.architecture = meta.get("backbone", "unet"), meta.get("model_type", "unet"), meta.get("architecture") or type(model).__name__
         training_state.mode, training_state.num_classes, training_state.class_names = meta.get("mode", "binary"), max(int(meta.get("num_classes", len(resolved_classes))), len(resolved_classes)), resolved_classes
         training_state.tile_size, training_state.best_map, training_state.training_completed, training_state.is_training = int(meta.get("tile_size", meta.get("target_size", 256))), float(meta.get("best_iou", 0.0)), True, False
+        training_state.extra_info = meta.get("extra_info", {})
         return JSONResponse({"success": True, "model_path": model_path, "model_name": training_state.model_name, "backbone": training_state.model_backbone, "model_type": training_state.model_type, "architecture": training_state.architecture, "mode": training_state.mode, "class_names": training_state.class_names, "num_classes": training_state.num_classes, "tile_size": training_state.tile_size, "best_iou": training_state.best_map, "base_channels": meta.get("base_channels"), "num_levels": meta.get("num_levels"), "model_config": meta.get("model_config", {}), "extra_info": meta.get("extra_info", {}), "epoch": meta.get("epoch"), "bound_label": training_state.current_label, "label": training_state.current_label, "bound_project_id": training_state.current_project_id})
     except HTTPException: raise
     except Exception as e:
@@ -3550,7 +3555,8 @@ async def predict_compat(data: Dict):
                 "class_names": training_state.class_names,
                 "architecture": training_state.architecture,
                 "backbone": training_state.model_backbone,
-                "best_iou": training_state.best_map
+                "best_iou": training_state.best_map,
+                "extra_info": getattr(training_state, "extra_info", {}) or {}
             }
         else:
             model, meta = load_checkpoint(model_path, device)
@@ -3559,6 +3565,7 @@ async def predict_compat(data: Dict):
             training_state.mode, training_state.class_names = meta.get("mode", "binary"), _normalise_model_class_names(meta)
             training_state.tile_size = int(meta.get("tile_size", meta.get("target_size", 256)))
             training_state.best_map = float(meta.get("best_iou", 0.0))
+            training_state.extra_info = meta.get("extra_info", {})
         model_type, mode, tile_size, eval_tf = normalize_model_type(meta.get("model_type", "unet")), meta["mode"], int(meta["target_size"]), get_eval_transform(meta["mode"])
         model_class_names = _normalise_model_class_names(meta)
         is_detector_model = hasattr(model, "roi_heads") or model_type in DETECTION_MODELS or model_type in INSTANCE_MODELS
@@ -3638,18 +3645,18 @@ async def predict_compat(data: Dict):
             full_tensor = TF.to_tensor(img_pil).to(device)
 
             # ================================================================
-            # TILE-BASED DETECTOR INFERENCE (ArcGIS Pro DLPK Parity)
-            #   - Core tiles at stride = core_size (e.g. 512)
-            #   - Symmetric padding on all 4 sides of full raster (e.g. 128px)
-            #   - Centroid-in-core filtering for seam deduplication
-            #   - Polygon NMS matching ArcGIS Pro Non Maximum Suppression
-            #     (Max Overlap Ratio: intersection / min(areaA, areaB))
+            # TILE-BASED DETECTOR INFERENCE (Exact ArcGIS Pro DLPK Math)
+            # In ArcGIS Pro Detect Objects Using Deep Learning:
+            #   - `tile_size` (e.g. 512) IS the chip size fed to PyTorch
+            #   - `padding` (e.g. 128 = 25% of tile_size) is the overlap border
+            #   - `core_size = tile_size - 2 * padding` (e.g. 256) is the inner core
+            #   - `stride = core_size`
             # ================================================================
-            core_size = int(data.get("tile_size") or 512)
-            if core_size < 64:
-                core_size = 512
-            padding = max(64, int(core_size * 0.25))  # 128px for 512 tile, 64px for 256 tile
-            chip_size = core_size + 2 * padding
+            chip_size = int(data.get("tile_size") or 512)
+            if chip_size < 64:
+                chip_size = 512
+            padding = max(16, min(chip_size // 2 - 16, int(chip_size * 0.25)))  # 128px for 512, 64px for 256
+            core_size = max(32, chip_size - 2 * padding)                        # 256px for 512, 128px for 256
 
             gx_list = list(range(0, W, core_size))
             gy_list = list(range(0, H, core_size))
@@ -3670,11 +3677,19 @@ async def predict_compat(data: Dict):
                         "slice": (gx, gy, gx + chip_size, gy + chip_size)
                     })
 
-            print(f"[PREDICT] Detector inference: {len(chips_meta)} chips (core={core_size}px, pad={padding}px, chip={chip_size}px) | thresh={eff_threshold:.2f} max_overlap={nms_threshold:.2f}", flush=True)
+            print(f"[PREDICT] Detector inference: {len(chips_meta)} chips (chip={chip_size}px, core={core_size}px, pad={padding}px) | thresh={eff_threshold:.2f} max_overlap={nms_threshold:.2f}", flush=True)
 
+            extra_meta = (meta.get("extra_info") or {}) if isinstance(meta, dict) else {}
+            is_arcgis_learn = "arcgis.learn" in str(extra_meta.get("emd_framework") or "").lower()
+            resize_to = extra_meta.get("emd_resize_to")
             if hasattr(model, "transform"):
-                model.transform.min_size = (chip_size,)
-                model.transform.max_size = max(chip_size, 1024)
+                if is_arcgis_learn and not resize_to:
+                    # Standard torchvision MaskRCNN scale used by arcgis.learn when resize_to is null
+                    model.transform.min_size = (800,)
+                    model.transform.max_size = 1333
+                else:
+                    model.transform.min_size = (int(resize_to) if resize_to else chip_size,)
+                    model.transform.max_size = max(chip_size, 1024)
             if hasattr(model, "roi_heads") and hasattr(model.roi_heads, "detections_per_img"):
                 model.roi_heads.detections_per_img = max(300, int(model.roi_heads.detections_per_img))
 
@@ -4108,7 +4123,8 @@ async def api_evaluate_geojson(data: Dict):
                 "class_names": training_state.class_names,
                 "architecture": training_state.architecture,
                 "backbone": training_state.model_backbone,
-                "best_iou": training_state.best_map
+                "best_iou": training_state.best_map,
+                "extra_info": getattr(training_state, "extra_info", {}) or {}
             }
         else:
             model, meta = load_checkpoint(model_path, device)
@@ -4117,6 +4133,7 @@ async def api_evaluate_geojson(data: Dict):
             training_state.mode, training_state.class_names = meta.get("mode", "binary"), _normalise_model_class_names(meta)
             training_state.tile_size = int(meta.get("tile_size", meta.get("target_size", 256)))
             training_state.best_map = float(meta.get("best_iou", 0.0))
+            training_state.extra_info = meta.get("extra_info", {})
         mode, tile_size, model_type, eval_tf = meta.get("mode", "binary"), int(meta.get("target_size") or meta.get("tile_size") or 64), normalize_model_type(meta.get("model_type", "unet")), get_eval_transform(meta.get("mode", "binary"))
         gt_features, pred_features, chips_skipped_no_bounds, processed_chip_names = [], [], [], []
         inst_tp = inst_fp = inst_fn = 0; inst_ious, iou_list, f1_list, prec_list, rec_list = [], [], [], [], []
