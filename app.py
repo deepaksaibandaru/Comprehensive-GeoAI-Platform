@@ -3494,8 +3494,8 @@ async def predict_compat(data: Dict):
         model_path, image_path = data.get("model_path") or training_state.model_path, data.get("image_path") or training_state.image_path
         raster_path = data.get("raster_path")
         bounds = data.get("bounds") or training_state.image_bounds_latlon
-        threshold = float(data.get("threshold", 0.25))
-        nms_threshold = float(data.get("nms_threshold", 0.45))
+        threshold = float(data.get("threshold", 0.35))
+        nms_threshold = float(data.get("nms_threshold", 0.30))
         max_size_m = float(data.get("max_size_m", 150.0))
         min_size_m = float(data.get("min_size_m", 2.0))
         min_area = int(data.get("min_area", 0))
@@ -3633,21 +3633,24 @@ async def predict_compat(data: Dict):
             import torchvision.transforms.functional as TF
             full_tensor = TF.to_tensor(img_pil).to(device)
 
-            # Sliding window tile size with overlap to guarantee complete edge coverage
-            core_size = int(data.get("tile_size") or 512)
-            if core_size < 256:
-                core_size = 512
-            padding = max(64, int(core_size * 0.25))  # 128px for 512 tile, 64px for 256 tile
+            # ================================================================
+            # TILE-BASED DETECTOR INFERENCE
+            # Matches BraeinAIMaskRCNN.py (ArcGIS Pro DLPK) exactly:
+            #   - Core tiles at stride = core_size (NO sliding overlap)
+            #   - Padding margin for context (buildings at seam are detected whole)
+            #   - CENTROID-IN-CORE filtering for seam deduplication
+            #   - Only real polygon mask contours emitted (NO bbox fallback)
+            #   - No NMS needed (centroid filtering handles duplicates)
+            # ================================================================
+            core_size = int(data.get("tile_size") or 256)
+            if core_size < 64:
+                core_size = 256
+            padding = max(64, int(core_size * 0.25))  # 64px for 256 tile, 128px for 512
             chip_size = core_size + 2 * padding
-            stride = max(128, int(core_size * 0.75))  # 25% sliding overlap to eliminate border misses
 
-            gx_list = list(range(0, max(W - core_size, 0) + 1, stride)) or [0]
-            if gx_list[-1] != max(W - core_size, 0) and max(W - core_size, 0) > 0:
-                gx_list.append(max(W - core_size, 0))
-
-            gy_list = list(range(0, max(H - core_size, 0) + 1, stride)) or [0]
-            if gy_list[-1] != max(H - core_size, 0) and max(H - core_size, 0) > 0:
-                gy_list.append(max(H - core_size, 0))
+            # Grid at core_size stride (NO overlap - matches ArcGIS Pro)
+            gx_list = list(range(0, W, core_size))
+            gy_list = list(range(0, H, core_size))
 
             chips_meta = []
             for gy in gy_list:
@@ -3663,11 +3666,12 @@ async def predict_compat(data: Dict):
                         "pad": (px1, py1, px2, py2)
                     })
 
-            print(f"[PREDICT] Tile-based detector inference: {len(chips_meta)} padded chips (core={core_size}px, pad={padding}px, chip={chip_size}px, stride={stride}px) | thresh={eff_threshold:.2f} nms={nms_threshold:.2f}", flush=True)
+            print(f"[PREDICT] Detector inference: {len(chips_meta)} chips (core={core_size}px, pad={padding}px, chip={chip_size}px) | thresh={eff_threshold:.2f}", flush=True)
 
+            # Set native scale (matching ArcGIS Pro: min_size = chip, max_size = chip)
             if hasattr(model, "transform"):
                 model.transform.min_size = (chip_size,)
-                model.transform.max_size = max(chip_size * 2, 1024)
+                model.transform.max_size = max(chip_size, 1024)
 
             batch_size = 4
             with torch.inference_mode():
@@ -3678,6 +3682,7 @@ async def predict_compat(data: Dict):
                         px1, py1, px2, py2 = meta_item["pad"]
                         chip_t = full_tensor[:, py1:py2, px1:px2]
                         ch, cw = chip_t.shape[1], chip_t.shape[2]
+                        # Skip blank/empty chips (matches ArcGIS Pro: std < 0.005)
                         if chip_t.std() < 0.005:
                             continue
                         pad_r = max(0, chip_size - cw)
@@ -3709,18 +3714,19 @@ async def predict_compat(data: Dict):
                                 continue
                             b = c_boxes[i]
                             bw, bh = float(b[2] - b[0]), float(b[3] - b[1])
+                            # Skip tiny noise (matches ArcGIS Pro)
                             if min(bw, bh) < 4:
                                 continue
 
+                            # Physical size filtering in meters (matches ArcGIS Pro)
                             w_m = bw * m_per_px
                             h_m = bh * m_per_px
-                            # Only filter if BOTH dimensions are smaller than min_size_m
-                            if min_size_m > 0 and max(w_m, h_m) < min_size_m:
+                            if min_size_m > 0 and (w_m < min_size_m or h_m < min_size_m):
                                 continue
-                            # Only filter if BOTH dimensions exceed max_size_m or one exceeds 2.5x max_size_m
-                            if max_size_m > 0 and (min(w_m, h_m) > max_size_m or max(w_m, h_m) > max_size_m * 2.5):
+                            if max_size_m > 0 and (w_m > max_size_m or h_m > max_size_m):
                                 continue
 
+                            # ---- POLYGON MASK EXTRACTION (matches ArcGIS Pro exactly) ----
                             poly_shp = None
                             if c_masks is not None and i < len(c_masks):
                                 try:
@@ -3731,8 +3737,8 @@ async def predict_compat(data: Dict):
                                         tile_area = float(chip_size * chip_size)
                                         for c in contours:
                                             c_area = cv2.contourArea(c)
-                                            # Filter out small noise and full-tile background artifacts (>= 90% tile area)
-                                            if c_area < 4.0 or c_area >= 0.90 * tile_area:
+                                            # Matches ArcGIS Pro: skip noise (< 6px) and full-tile artifacts (>= 60%)
+                                            if c_area < 6.0 or c_area >= 0.60 * tile_area:
                                                 continue
                                             c_approx = cv2.approxPolyDP(c, epsilon=1.0, closed=True)
                                             pts = [(float(pt[0][0]) + px1, float(pt[0][1]) + py1) for pt in c_approx]
@@ -3741,24 +3747,24 @@ async def predict_compat(data: Dict):
                                                 p = ShapelyPolygon(pts)
                                                 if not p.is_valid:
                                                     p = p.buffer(0)
-                                                if not p.is_empty and p.area >= 4.0:
+                                                if not p.is_empty and p.area >= 6.0:
                                                     all_polys.append(p)
                                         if all_polys:
                                             poly_shp = all_polys[0] if len(all_polys) == 1 else max(all_polys, key=lambda p: p.area)
                                 except Exception:
                                     poly_shp = None
 
+                            # NO bounding-box fallback! Only real polygon masks (matches ArcGIS Pro)
                             if poly_shp is None:
-                                # Fallback to bounding box polygon if mask contour was empty
-                                b = c_boxes[i]
-                                bx1, by1, bx2, by2 = float(b[0]) + px1, float(b[1]) + py1, float(b[2]) + px1, float(b[3]) + py1
-                                poly_shp = box(bx1, by1, bx2, by2)
-
-                            # Validate candidate centroid falls within raster bounds and within chip pad margin
-                            c_pt = poly_shp.centroid
-                            if not (0 <= c_pt.x <= W and 0 <= c_pt.y <= H):
                                 continue
-                            if c_pt.x < px1 or c_pt.x > px2 or c_pt.y < py1 or c_pt.y > py2:
+
+                            # ---- CENTROID-IN-CORE FILTERING (ArcGIS Pro seam deduplication) ----
+                            # A detection belongs to this tile IF AND ONLY IF its centroid
+                            # falls inside the core tile region. Because each tile has padding,
+                            # any building in the core is fully surrounded by image context and
+                            # is NEVER sliced at the core boundary.
+                            c_pt = poly_shp.centroid
+                            if not (core_x1 <= c_pt.x < core_x2 and core_y1 <= c_pt.y < core_y2):
                                 continue
 
                             lbl = int(c_labels[i]) if (c_labels is not None and i < len(c_labels)) else 1
@@ -3776,52 +3782,10 @@ async def predict_compat(data: Dict):
                                 "h_m": h_m
                             })
 
-            # Non-Maximum Suppression (NMS) to eliminate duplicate proposals across sliding tiles
-            raw_items.sort(key=lambda x: x["score"], reverse=True)
-            final_items = []
-            eff_nms = max(0.40, min(0.90, nms_threshold))
-
-            for cur in raw_items:
-                is_dup = False
-                cb = cur["b_px"]
-                cur_area = max(1.0, (cb[2] - cb[0]) * (cb[3] - cb[1]))
-
-                for prev in final_items:
-                    pb = prev["b_px"]
-                    prev_area = max(1.0, (pb[2] - pb[0]) * (pb[3] - pb[1]))
-                    ix1, iy1 = max(cb[0], pb[0]), max(cb[1], pb[1])
-                    ix2, iy2 = min(cb[2], pb[2]), min(cb[3], pb[3])
-                    iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
-                    inter_box = iw * ih
-                    if inter_box <= 0:
-                        continue
-
-                    union_box = cur_area + prev_area - inter_box
-                    box_iou = inter_box / max(1.0, union_box)
-
-                    poly_iou = 0.0
-                    containment = 0.0
-                    if cur["poly"].intersects(prev["poly"]):
-                        try:
-                            p_inter = cur["poly"].intersection(prev["poly"]).area
-                            p_union = cur["poly"].area + prev["poly"].area - p_inter
-                            poly_iou = p_inter / max(1.0, p_union)
-                            containment = p_inter / max(1.0, min(cur["poly"].area, prev["poly"].area))
-                        except Exception:
-                            poly_iou = 0.0
-                            containment = 0.0
-
-                    # For building footprints, two detections are duplicates ONLY if:
-                    # 1) Polygons overlap with high IoU (poly_iou >= eff_nms)
-                    # 2) One polygon is overwhelmingly contained inside the other (containment >= 0.80)
-                    # 3) Both box_iou is very high (>= 0.75) AND there is meaningful polygon overlap (poly_iou >= 0.25)
-                    # Separate adjacent buildings must NEVER be eliminated just because their axis-aligned bounding boxes align!
-                    if poly_iou >= eff_nms or containment >= 0.80 or (box_iou >= 0.75 and poly_iou >= 0.25):
-                        is_dup = True
-                        break
-
-                if not is_dup:
-                    final_items.append(cur)
+            # No NMS needed: centroid-in-core filtering already guarantees each building
+            # is emitted exactly once (by the tile whose core contains its centroid).
+            # This matches ArcGIS Pro which also does NOT run NMS.
+            final_items = raw_items
 
             score_np = np.array([item["score"] for item in final_items], dtype=np.float32) if final_items else np.zeros((0,), dtype=np.float32)
             print(f"[PREDICT] Detection: {len(raw_items)} raw candidates, {len(final_items)} retained after NMS", flush=True)

@@ -684,15 +684,9 @@
                                     <span id="predictThresholdVal" style="color:#4ecdc4;font-weight:700;min-width:32px;font-size:11px;text-align:right;">0.35</span>
                                 </div>
                                 <div class="config-row" style="align-items:center;margin-top:6px;">
-                                    <label for="predictNmsThreshold">NMS Overlap (IoU):</label>
-                                    <div style="display:flex;align-items:center;gap:4px;">
-                                        <input type="number" id="predictNmsThreshold" value="0.45" min="0.05" max="0.80" step="0.05" style="width:65px;">
-                                    </div>
-                                </div>
-                                <div class="config-row" style="align-items:center;margin-top:6px;">
                                     <label for="predictMaxSize">Max Size (m):</label>
                                     <div style="display:flex;align-items:center;gap:4px;">
-                                        <input type="number" id="predictMaxSize" value="150" min="0" max="1000" step="5" style="width:65px;">
+                                        <input type="number" id="predictMaxSize" value="65" min="0" max="1000" step="5" style="width:65px;">
                                         <span style="color:#4ecdc4;font-weight:700;font-size:11px;">m</span>
                                         <span style="font-size:9.5px;color:#64748b;">(0=all)</span>
                                     </div>
@@ -705,15 +699,9 @@
                                         <span style="font-size:9.5px;color:#64748b;">(0=all)</span>
                                     </div>
                                 </div>
-                                <div class="config-row" style="align-items:center;margin-top:8px;padding-top:6px;border-top:1px solid #1e293b;">
-                                    <label for="predictRegularize" style="cursor:pointer;font-size:11px;color:#e2e8f0;display:flex;align-items:center;gap:6px;">
-                                        <input type="checkbox" id="predictRegularize" style="width:15px;height:15px;cursor:pointer;accent-color:#38bdf8;">
-                                        <span>Square / Regularize Footprints</span>
-                                    </label>
-                                </div>
-                                <div style="font-size:10px;color:#94a3b8;line-height:1.4;margin-top:4px;">
-                                    Snaps building footprints into crisp rectangular / square shapes aligned to roof orientation.
-                                </div>
+                                <!-- Hidden: NMS and Regularize not used in ArcGIS Pro reference pipeline -->
+                                <input type="hidden" id="predictNmsThreshold" value="0.30">
+                                <input type="hidden" id="predictRegularize" value="">
                             </div>
                             <div class="config-section" id="predictAoiSection">
                                 <div class="section-title" style="display:flex;justify-content:space-between;align-items:center;">
@@ -889,7 +877,7 @@
         </div>
     </div>
 
-    <script src="/static/app.js?v=geoai-shp-aoi-20261124-v7"></script>
+    <script src="/static/app.js?v=geoai-arcgis-match-20261125-v1"></script>
     <script>
     // Direct global definition for shapefile upload & AOI management (bypasses browser caching)
     window.handlePredictShpUpload = function(event) {

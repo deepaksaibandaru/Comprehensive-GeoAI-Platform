@@ -1831,12 +1831,12 @@ function loadModel(path) {
         if (isDetector) {
             const pThr = document.getElementById('predictThreshold');
             const pVal = document.getElementById('predictThresholdVal');
-            if (pThr) pThr.value = '0.25';
-            if (pVal) pVal.textContent = '0.25';
+            if (pThr) pThr.value = '0.35';
+            if (pVal) pVal.textContent = '0.35';
             const pNms = document.getElementById('predictNmsThreshold');
-            if (pNms) pNms.value = '0.45';
+            if (pNms) pNms.value = '0.30';
             const pMax = document.getElementById('predictMaxSize');
-            if (pMax) pMax.value = '150';
+            if (pMax) pMax.value = '65';
             const pMin = document.getElementById('predictMinSize');
             if (pMin) pMin.value = '2';
             const pTile = document.getElementById('predictTileSize');
