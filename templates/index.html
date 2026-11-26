@@ -625,21 +625,33 @@
                         <div class="predict-right">
                             <div class="config-section" id="predictAoiSection">
                                 <div class="section-title" style="display:flex;justify-content:space-between;align-items:center;">
-                                    <span>📍 AOI / REGION MODE</span>
+                                    <span>📍 AOI &amp; FEATURE TYPE</span>
                                     <span id="predictAoiBadge" class="badge" style="background:#0284c7;color:#fff;font-size:9.5px;padding:2px 6px;border-radius:3px;display:none;">AOI Loaded</span>
                                 </div>
-                                <div style="font-size:11px;color:#94a3b8;line-height:1.5;margin-bottom:8px;">
-                                    By default, PREDICT runs on the current view. Upload a <strong>Shapefile</strong> or draw an AOI on the map to automatically fetch, clip, and predict for that exact boundary.
+                                <div style="font-size:10.5px;color:#94a3b8;line-height:1.45;margin-bottom:8px;">
+                                    Predicts within your map view or uploaded/drawn AOI boundary, and auto-applies post-processing (e.g., straightens <strong>Buildings</strong>) by Feature Type.
                                 </div>
-                                <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
-                                    <input type="file" id="predictShpUploadInput" accept=".zip,.shp,.shx,.dbf,.prj,.cpg,.geojson,.json,.kml" multiple style="display:none;" onchange="handlePredictShpUpload(event)">
-                                    <button type="button" class="btn btn-sm btn-info" id="btnUploadPredictShp" onclick="document.getElementById('predictShpUploadInput').click()" style="display:flex;align-items:center;gap:5px;font-size:11px;padding:4px 9px;border-radius:4px;background:#0284c7;border:1px solid #38bdf8;color:#fff;cursor:pointer;" title="Upload ESRI Shapefile bundle (.zip) or .shp">
-                                        <i class="fas fa-file-upload"></i> Upload Shapefile
-                                    </button>
-                                    <button type="button" class="btn btn-sm btn-secondary" id="btnClearPredictAoi" onclick="clearPredictAoi()" style="display:none;font-size:11px;padding:4px 8px;border-radius:4px;background:#334155;border:1px solid #475569;color:#e2e8f0;cursor:pointer;" title="Clear AOI and reset to map view">
-                                        <i class="fas fa-times"></i> Clear AOI
-                                    </button>
+                                <input type="file" id="predictShpUploadInput" accept=".zip,.shp,.shx,.dbf,.prj,.cpg,.geojson,.json,.kml" multiple style="display:none;" onchange="handlePredictShpUpload(event)">
+                                <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;align-items:end;">
+                                    <div style="min-width:0;">
+                                        <div style="font-size:10px;color:#94a3b8;margin-bottom:3px;font-weight:600;">AOI Boundary</div>
+                                        <button type="button" class="btn btn-sm btn-info" id="btnUploadPredictShp" onclick="document.getElementById('predictShpUploadInput').click()" style="width:100%;height:30px;display:flex;align-items:center;justify-content:center;gap:5px;font-size:11px;padding:4px 8px;border-radius:4px;background:#0284c7;border:1px solid #38bdf8;color:#fff;cursor:pointer;white-space:nowrap;" title="Upload ESRI Shapefile bundle (.zip) or .shp">
+                                            <i class="fas fa-file-upload"></i> Upload Shapefile
+                                        </button>
+                                    </div>
+                                    <div style="min-width:0;">
+                                        <div style="font-size:10px;color:#94a3b8;margin-bottom:3px;font-weight:600;">Feature Type</div>
+                                        <select id="postProcessType" onchange="onPostProcessTypeChange()" style="width:100%;height:30px;padding:4px 8px;background:#0f172a;border:1px solid #334155;color:#e2e8f0;border-radius:4px;font-size:11.5px;">
+                                            <option value="buildings" selected>Buildings</option>
+                                            <option value="storage_tanks">Storage Tanks</option>
+                                            <option value="roads">Roads</option>
+                                            <option value="none">None (Raw)</option>
+                                        </select>
+                                    </div>
                                 </div>
+                                <button type="button" class="btn btn-sm btn-secondary" id="btnClearPredictAoi" onclick="clearPredictAoi()" style="display:none;margin-top:6px;font-size:11px;padding:4px 8px;border-radius:4px;background:#334155;border:1px solid #475569;color:#e2e8f0;cursor:pointer;" title="Clear AOI and reset to map view">
+                                    <i class="fas fa-times"></i> Clear AOI
+                                </button>
                                 <div id="predictAoiCard" style="display:none;margin-top:8px;background:#0a0e17;border:1px solid #0284c7;border-radius:4px;padding:6px 8px;font-size:10px;">
                                     <div style="display:flex;justify-content:space-between;align-items:center;">
                                         <span id="predictAoiName" style="color:#38bdf8;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:170px;"></span>
@@ -647,6 +659,7 @@
                                     </div>
                                     <div id="predictAoiDetails" style="color:#94a3b8;font-size:9.5px;margin-top:2px;"></div>
                                 </div>
+                                <div id="postProcessSummary" style="font-size:10px;color:#94a3b8;margin-top:6px;"></div>
                             </div>
                             <div class="config-section">
                                 <div class="section-title">📐 RESOLUTION (GSD)</div>
@@ -716,22 +729,6 @@
                                     </div>
                                 </div>
                                 <input type="hidden" id="predictRegularize" value="">
-                            </div>
-                            <div class="config-section" id="predictPostProcessSection">
-                                <div class="section-title">📐 POST PROCESSING</div>
-                                <div class="config-row" style="align-items:center;">
-                                    <label for="postProcessType">Feature Type:</label>
-                                    <select id="postProcessType" onchange="onPostProcessTypeChange()" style="flex:1;padding:5px 8px;background:#0f172a;border:1px solid #334155;color:#e2e8f0;border-radius:4px;font-size:11.5px;">
-                                        <option value="buildings" selected>Buildings</option>
-                                        <option value="storage_tanks">Storage Tanks</option>
-                                        <option value="roads">Roads</option>
-                                        <option value="none">None (Raw)</option>
-                                    </select>
-                                </div>
-                                <div style="font-size:10px;color:#94a3b8;line-height:1.4;margin-top:6px;">
-                                    Applies automatically by Feature Type (<b>Buildings</b> straightens curved edges; <b>None</b> keeps raw output).
-                                </div>
-                                <div id="postProcessSummary" style="font-size:10px;color:#94a3b8;margin-top:6px;"></div>
                             </div>
                             <div class="config-section">
                                 <div class="section-title">📊 DETECTION RESULTS</div>
