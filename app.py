@@ -4030,6 +4030,167 @@ async def api_predict_folder(data: Dict):
     except Exception as e:
         traceback.print_exc(); return JSONResponse({"success": False, "error": str(e)}, status_code=500)
 
+def _straighten_building_polygon(poly_wgs84, min_area_m2=2.0):
+    """Straighten curved edges of a building polygon in local meter coordinates while keeping overall shape."""
+    if poly_wgs84 is None or poly_wgs84.is_empty:
+        return None
+    if not poly_wgs84.is_valid:
+        poly_wgs84 = poly_wgs84.buffer(0)
+    if poly_wgs84.is_empty:
+        return None
+
+    c = poly_wgs84.centroid
+    cx0, cy0 = float(c.x), float(c.y)
+    kx = 111320.0 * max(0.1, math.cos(math.radians(cy0)))
+    ky = 110540.0
+
+    def _to_m(coords):
+        return [((float(x) - cx0) * kx, (float(y) - cy0) * ky) for x, y in coords]
+
+    def _to_deg(coords):
+        return [[round(cx0 + float(xm) / kx, 7), round(cy0 + float(ym) / ky, 7)] for xm, ym in coords]
+
+    ext_m = _to_m(poly_wgs84.exterior.coords)
+    holes_m = [_to_m(r.coords) for r in poly_wgs84.interiors]
+    p_m = ShapelyPolygon(ext_m, holes_m)
+    if not p_m.is_valid:
+        p_m = p_m.buffer(0)
+    if p_m.is_empty or p_m.area < min_area_m2:
+        return None
+
+    min_dim = min(p_m.bounds[2] - p_m.bounds[0], p_m.bounds[3] - p_m.bounds[1])
+    tol = min(1.8, max(0.5, min_dim * 0.15))
+    s_m = p_m.simplify(tol, preserve_topology=True)
+    if not s_m.is_valid:
+        s_m = s_m.buffer(0)
+    if s_m.is_empty or s_m.geom_type != "Polygon" or len(s_m.exterior.coords) < 4:
+        s_m = p_m.simplify(0.4, preserve_topology=True)
+    if s_m.is_empty or s_m.geom_type != "Polygon" or s_m.area < min_area_m2:
+        return poly_wgs84, float(p_m.area)
+
+    rings = [_to_deg(s_m.exterior.coords)]
+    for interior in s_m.interiors:
+        if len(interior.coords) >= 4:
+            rings.append(_to_deg(interior.coords))
+    return {"type": "Polygon", "coordinates": rings}, float(s_m.area)
+
+@app.post("/api/postprocess", dependencies=[Depends(require_api_key)])
+async def api_postprocess(data: Dict):
+    """Apply simple geometry post-processing (e.g. edge straightening for Buildings) to existing prediction GeoJSON."""
+    try:
+        feature_type = str(data.get("feature_type") or "buildings").strip().lower()
+        geojson = data.get("geojson") or {}
+        features = geojson.get("features") if isinstance(geojson, dict) else None
+        if not features:
+            return JSONResponse({"success": False, "error": "No prediction features provided. Run PREDICT first."}, status_code=400)
+
+        if feature_type != "buildings":
+            # Storage Tanks (or other types): return existing output unchanged
+            return JSONResponse({
+                "success": True,
+                "applied": False,
+                "feature_type": feature_type,
+                "message": "No edge post-processing applied for this feature type; output unchanged.",
+                "geojson": {"type": "FeatureCollection", "features": features},
+                "num_objects": len(features),
+                "ignored_minor": 0,
+                "shp_url": None
+            })
+
+        out_features = []
+        ignored_minor = 0
+
+        for feat in features:
+            geom = feat.get("geometry")
+            if not geom:
+                continue
+            gtype = geom.get("type")
+            coords = geom.get("coordinates")
+            props = dict(feat.get("properties") or {})
+
+            if gtype == "Polygon" and coords and len(coords[0]) >= 3:
+                poly = ShapelyPolygon(coords[0], coords[1:] if len(coords) > 1 else None)
+                res = _straighten_building_polygon(poly, min_area_m2=2.0)
+                if res is None:
+                    ignored_minor += 1
+                    continue
+                new_geom, area_m2 = res
+                if not isinstance(new_geom, dict):
+                    new_geom = geom
+                props["area_m2"] = round(area_m2, 2)
+                out_features.append({"type": "Feature", "geometry": new_geom, "properties": props})
+            elif gtype == "MultiPolygon" and coords:
+                new_parts = []
+                total_area = 0.0
+                for part in coords:
+                    if not part or len(part[0]) < 3:
+                        continue
+                    poly = ShapelyPolygon(part[0], part[1:] if len(part) > 1 else None)
+                    res = _straighten_building_polygon(poly, min_area_m2=2.0)
+                    if res is None:
+                        continue
+                    pg, area_m2 = res
+                    if isinstance(pg, dict) and pg.get("coordinates"):
+                        new_parts.append(pg["coordinates"])
+                        total_area += area_m2
+                if not new_parts:
+                    ignored_minor += 1
+                    continue
+                props["area_m2"] = round(total_area, 2)
+                out_features.append({"type": "Feature", "geometry": {"type": "MultiPolygon", "coordinates": new_parts}, "properties": props})
+            else:
+                out_features.append(feat)
+
+        out_geojson = {"type": "FeatureCollection", "features": out_features}
+        safe_label = (data.get("label") or training_state.current_label or "building").lower().replace(" ", "_")
+
+        shp_url = None
+        if out_features:
+            try:
+                shp_out_dir = os.path.join("labels", safe_label, "evaluation", "shp")
+                os.makedirs(shp_out_dir, exist_ok=True)
+                stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                shp_base = f"postprocess_{stamp}"
+                shp_file = os.path.join(shp_out_dir, f"{shp_base}.shp")
+                shp_zip = os.path.join(shp_out_dir, f"{shp_base}.zip")
+                geoms, records = [], []
+                for feat in out_features:
+                    g = feat.get("geometry")
+                    if g and g.get("type") == "Polygon" and g.get("coordinates"):
+                        p = ShapelyPolygon(g["coordinates"][0])
+                        if not p.is_valid:
+                            p = p.buffer(0)
+                        if not p.is_empty:
+                            geoms.append(p)
+                            pr = dict(feat.get("properties", {}))
+                            pr.pop("bbox", None)
+                            records.append(pr)
+                if geoms:
+                    gpd.GeoDataFrame(records, geometry=geoms, crs="EPSG:4326").to_file(shp_file)
+                    with zipfile.ZipFile(shp_zip, "w", zipfile.ZIP_DEFLATED) as zf:
+                        for ext in (".shp", ".shx", ".dbf", ".prj", ".cpg"):
+                            fn = os.path.join(shp_out_dir, f"{shp_base}{ext}")
+                            if os.path.exists(fn):
+                                zf.write(fn, os.path.basename(fn))
+                    shp_url = f"/labels/{safe_label}/evaluation/shp/{shp_base}.zip"
+            except Exception as shp_err:
+                print(f"[postprocess] Shapefile export warning: {shp_err}")
+
+        return JSONResponse({
+            "success": True,
+            "applied": True,
+            "feature_type": feature_type,
+            "geojson": out_geojson,
+            "num_objects": len(out_features),
+            "ignored_minor": ignored_minor,
+            "shp_url": shp_url
+        })
+    except HTTPException:
+        raise
+    except Exception as e:
+        traceback.print_exc()
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
 @app.post("/api/evaluate_geojson", dependencies=[Depends(require_api_key)])
 async def api_evaluate_geojson(data: Dict):
     VALID_SPLITS = ("train", "val", "test")
