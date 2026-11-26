@@ -88,7 +88,7 @@
         .train-right::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
 
         /* Height constraint for map + controls */
-        #map, #mapPredict, #mapEval, #mapPostProcess { flex: 1; min-height: 200px; background: #0a0e17; width: 100%; height: 100%; }
+        #map, #mapPredict, #mapEval { flex: 1; min-height: 200px; background: #0a0e17; width: 100%; height: 100%; }
 
         /* ===== UI Components ===== */
         .map-controls { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 12px; background: #0f172a; border-top: 2px solid #1e293b; flex-shrink: 0; align-items: center; min-height: 40px; z-index: 10; }
@@ -342,7 +342,6 @@
                 <button class="workflow-tab" data-panel="evaluate" onclick="switchWorkflow('evaluate')"><i class="fas fa-chart-bar tab-icon"></i> EVALUATE</button>
                 <button class="workflow-tab" data-panel="predict" onclick="switchWorkflow('predict')"><i class="fas fa-search tab-icon"></i> PREDICT</button>
                 <button class="workflow-tab" data-panel="finetune" onclick="switchWorkflow('finetune')"><i class="fas fa-layer-group tab-icon"></i> FINE TUNE</button>
-                <button class="workflow-tab" data-panel="postprocess" onclick="switchWorkflow('postprocess')"><i class="fas fa-vector-square tab-icon"></i> POST PROCESSING</button>
             </div>
 
             <div class="workflow-content">
@@ -734,6 +733,28 @@
                                     <div id="predictAoiDetails" style="color:#94a3b8;font-size:9.5px;margin-top:2px;"></div>
                                 </div>
                             </div>
+                            <div class="config-section" id="predictPostProcessSection">
+                                <div class="section-title">📐 POST PROCESSING</div>
+                                <div class="config-row" style="align-items:center;">
+                                    <label for="postProcessType">Feature Type:</label>
+                                    <select id="postProcessType" style="flex:1;padding:5px 8px;background:#0f172a;border:1px solid #334155;color:#e2e8f0;border-radius:4px;font-size:11.5px;">
+                                        <option value="buildings" selected>Buildings</option>
+                                        <option value="storage_tanks">Storage Tanks</option>
+                                    </select>
+                                </div>
+                                <div style="font-size:10px;color:#94a3b8;line-height:1.4;margin-top:6px;">
+                                    Straightens curved building edges only when <b>Buildings</b> is selected and you click <b>Apply Post Processing</b>.
+                                </div>
+                                <div style="display:flex;gap:6px;margin-top:8px;">
+                                    <button class="btn btn-info btn-sm" id="btnApplyPostProcess" onclick="applyPostProcessing()" style="flex:1;background:#0284c7;color:white;font-weight:600;font-size:11px;">
+                                        <i class="fas fa-check"></i> Apply Post Processing
+                                    </button>
+                                    <button class="btn btn-secondary btn-sm" onclick="resetPostProcessing()" title="Restore original prediction polygons" style="font-size:11px;">
+                                        <i class="fas fa-undo"></i> Reset
+                                    </button>
+                                </div>
+                                <div id="postProcessSummary" style="font-size:10px;color:#94a3b8;margin-top:6px;"></div>
+                            </div>
                             <div class="config-section">
                                 <div class="section-title">📊 DETECTION RESULTS</div>
                                 <div id="predictResults" style="font-size:11px;color:#94a3b8;max-height:160px;overflow-y:auto;"><p style="color:#64748b;">No predictions yet</p></div>
@@ -749,66 +770,6 @@
                             <div class="log-console">
                                 <div class="log-header"><span>📋 Predict Log</span></div>
                                 <div id="predictLogContent" class="log-content"><div class="log-entry log-info"><span class="time">[System]</span> Ready</div></div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-                
-                <!-- POST PROCESSING PANEL -->
-                <div class="workflow-panel" id="panel-postprocess">
-                    <div class="predict-container">
-                        <div class="predict-left">
-                            <div id="mapPostProcess"></div>
-                            <div class="map-controls">
-                                <button class="btn btn-warning btn-sm" id="btnApplyPostProcessMap" onclick="applyPostProcessing()" style="background:#0284c7;color:white;"><i class="fas fa-magic"></i> Apply Post Processing</button>
-                                <button class="btn btn-secondary btn-sm" onclick="resetPostProcessing()"><i class="fas fa-undo"></i> Reset Original</button>
-                                <span style="font-size:11px;color:#64748b;margin-left:auto;" id="postProcessStatus">Ready</span>
-                            </div>
-                            <div class="status-bar">
-                                <span class="status-text" id="postProcessStatusText">Select a feature type and click Apply Post Processing</span>
-                                <span class="info-item"><span class="label">Objects:</span><span class="value" id="postProcessObjectCount">0</span></span>
-                                <span class="info-item"><span class="label">Mode:</span><span class="value" id="postProcessModeDisplay">Original</span></span>
-                            </div>
-                        </div>
-                        <div class="predict-right">
-                            <div class="config-section">
-                                <div class="section-title">📐 POST PROCESSING</div>
-                                <div class="config-row" style="align-items:center;">
-                                    <label for="postProcessType">Feature Type:</label>
-                                    <select id="postProcessType" style="flex:1;padding:6px 8px;background:#0f172a;border:1px solid #334155;color:#e2e8f0;border-radius:4px;font-size:12px;">
-                                        <option value="buildings" selected>Buildings</option>
-                                        <option value="storage_tanks">Storage Tanks</option>
-                                    </select>
-                                </div>
-                                <div style="font-size:10.5px;color:#94a3b8;line-height:1.45;margin-top:8px;">
-                                    When <b>Buildings</b> is selected, curved building edges are straightened while preserving all detected footprints. Prediction output remains unchanged until you click <b>Apply Post Processing</b>.
-                                </div>
-                                <div style="display:flex;gap:8px;margin-top:10px;">
-                                    <button class="btn btn-info btn-sm" id="btnApplyPostProcess" onclick="applyPostProcessing()" style="flex:1;background:#0284c7;color:white;font-weight:600;">
-                                        <i class="fas fa-check"></i> Apply Post Processing
-                                    </button>
-                                    <button class="btn btn-secondary btn-sm" onclick="resetPostProcessing()" title="Restore original prediction polygons">
-                                        <i class="fas fa-undo"></i> Reset
-                                    </button>
-                                </div>
-                            </div>
-                            <div class="config-section">
-                                <div class="section-title">📊 POST PROCESSING SUMMARY</div>
-                                <div id="postProcessSummary" style="font-size:11px;color:#94a3b8;line-height:1.6;">
-                                    <p style="color:#64748b;">Run PREDICT first, then click Apply Post Processing.</p>
-                                </div>
-                            </div>
-                            <div class="config-section">
-                                <div class="section-title">📥 EXPORT</div>
-                                <div style="display:flex;gap:6px;flex-wrap:wrap;">
-                                    <button class="btn btn-success btn-sm" onclick="exportGeoJSON()" style="flex:1;"><i class="fas fa-file-code"></i> GeoJSON</button>
-                                    <button class="btn btn-info btn-sm" onclick="exportShapefile()" style="flex:1;"><i class="fas fa-file-shape"></i> Shapefile</button>
-                                </div>
-                                <button class="btn btn-secondary btn-sm" onclick="downloadShapefile()" id="postProcessShpBtn" style="display:none;margin-top:6px;width:100%;">📥 Download SHP</button>
-                            </div>
-                            <div class="log-console">
-                                <div class="log-header"><span>📋 Post Process Log</span></div>
-                                <div id="postProcessLogContent" class="log-content"><div class="log-entry log-info"><span class="time">[System]</span> Ready</div></div>
                             </div>
                         </div>
                     </div>
@@ -943,7 +904,7 @@
         </div>
     </div>
 
-    <script src="/static/app.js?v=geoai-postprocess-20261126-v1"></script>
+    <script src="/static/app.js?v=geoai-postprocess-20261126-v2"></script>
     <script>
     // Direct global definition for shapefile upload & AOI management (bypasses browser caching)
     window.handlePredictShpUpload = function(event) {
