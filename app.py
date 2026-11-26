@@ -3936,6 +3936,7 @@ async def predict_compat(data: Dict):
 
         if aoi_clip_shape is not None and not aoi_clip_shape.is_empty:
             try:
+                from shapely.geometry import mapping as to_mapping
                 # Use exact AOI polygon boundary without artificial outward buffer
                 aoi_test_shape = aoi_clip_shape
                 kept = []
@@ -3946,19 +3947,29 @@ async def predict_compat(data: Dict):
                             kept.append(feat)
                             continue
                         if geom.get("type") == "Polygon":
-                            poly = ShapelyPolygon(geom["coordinates"][0])
+                            poly = ShapelyPolygon(geom["coordinates"][0], geom["coordinates"][1:] if len(geom["coordinates"]) > 1 else None)
                         else:
                             poly = unary_union([ShapelyPolygon(ring[0]) for ring in geom["coordinates"] if len(ring[0]) >= 3])
                         if not poly.is_valid:
                             poly = poly.buffer(0)
-                        # Keep complete building if it touches or intersects the AOI boundary
-                        if not (poly.intersects(aoi_test_shape) or poly.centroid.intersects(aoi_test_shape)):
+                        # Only keep buildings whose centroid is strictly inside the AOI boundary
+                        if poly.is_empty or not poly.centroid.intersects(aoi_test_shape):
                             dropped += 1
                             continue
+                        # Clip geometry strictly to AOI boundary so nothing protrudes outside
+                        if not poly.within(aoi_test_shape):
+                            clipped = poly.intersection(aoi_test_shape)
+                            if clipped.geom_type == "GeometryCollection":
+                                polys_only = [g for g in clipped.geoms if g.geom_type in ("Polygon", "MultiPolygon") and not g.is_empty]
+                                clipped = unary_union(polys_only) if polys_only else None
+                            if clipped is None or clipped.is_empty or clipped.geom_type not in ("Polygon", "MultiPolygon"):
+                                dropped += 1
+                                continue
+                            feat["geometry"] = json.loads(json.dumps(to_mapping(clipped)))
                         kept.append(feat)
                     except Exception:
                         dropped += 1
-                print(f"[PREDICT] AOI Boundary Filter: {len(kept)}/{len(features)} buildings inside AOI (dropped {dropped} outside)", flush=True)
+                print(f"[PREDICT] AOI Boundary Filter: {len(kept)}/{len(features)} buildings strictly inside AOI (dropped {dropped} outside)", flush=True)
                 features = kept
             except Exception as clip_err:
                 print(f"[PREDICT] AOI clipping error: {clip_err}", flush=True)
