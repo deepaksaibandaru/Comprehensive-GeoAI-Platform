@@ -2148,6 +2148,13 @@ function handlePredictionResponse(d, predictionStartedAt, ps) {
         } catch(e) {}
     }
     renderPredictResults(d.geojson, d);
+    const ppType = document.getElementById('postProcessType')?.value || 'none';
+    const ppSummaryEl = document.getElementById('postProcessSummary');
+    if (count > 0 && ppType === 'buildings') {
+        applyPostProcessing(true);
+    } else if (ppSummaryEl) {
+        ppSummaryEl.innerHTML = count > 0 ? `<span style="color:#94a3b8;">Mode: ${ppType} (raw output)</span>` : '';
+    }
 }
 
 function runPrediction() {
@@ -2402,25 +2409,47 @@ function _updatePredictMapWithGeojson(geojson, shpUrl) {
     if (typeof renderPredictResults === 'function') renderPredictResults(geojson, {});
 }
 
-function applyPostProcessing() {
+function onPostProcessTypeChange() {
+    const featureType = document.getElementById('postProcessType')?.value || 'none';
+    const srcGeojson = originalPredictionGeojson || lastPredictionGeojson;
+    const summaryEl = document.getElementById('postProcessSummary');
+
+    if (!srcGeojson || !srcGeojson.features || srcGeojson.features.length === 0) {
+        if (summaryEl) summaryEl.innerHTML = `<span style="color:#94a3b8;">Selected: <b>${featureType}</b> (applies automatically after PREDICT).</span>`;
+        return;
+    }
+
+    if (featureType === 'buildings') {
+        applyPostProcessing(false);
+    } else {
+        const restored = JSON.parse(JSON.stringify(srcGeojson));
+        _updatePredictMapWithGeojson(restored, originalPredictionShp);
+        const ps = document.getElementById('predictStatus');
+        if (ps) { ps.textContent = `✅ ${restored.features.length} objects`; ps.style.color = '#34d399'; }
+        const label = featureType === 'none' ? 'None (Raw)' : (featureType === 'storage_tanks' ? 'Storage Tanks' : 'Roads');
+        if (summaryEl) summaryEl.innerHTML = `<span style="color:#94a3b8;">${label}: showing raw output (${restored.features.length} objects).</span>`;
+        addLog('info', `Post Processing set to ${label} — showing raw prediction output (${restored.features.length} objects).`);
+    }
+}
+
+function applyPostProcessing(silentEmpty) {
     const srcGeojson = originalPredictionGeojson || lastPredictionGeojson;
     const ps = document.getElementById('predictStatus');
     const summaryEl = document.getElementById('postProcessSummary');
     if (!srcGeojson || !srcGeojson.features || srcGeojson.features.length === 0) {
-        addLog('warning', 'No predictions found. Run PREDICT first before Post Processing.');
-        if (summaryEl) summaryEl.innerHTML = '<span style="color:#fbbf24;">⚠️ Run PREDICT first.</span>';
+        if (!silentEmpty) {
+            addLog('warning', 'No predictions found. Run PREDICT first before Post Processing.');
+            if (summaryEl) summaryEl.innerHTML = '<span style="color:#fbbf24;">⚠️ Run PREDICT first.</span>';
+        }
         return;
     }
 
     const featureType = document.getElementById('postProcessType')?.value || 'buildings';
     if (featureType !== 'buildings') {
-        addLog('info', 'Storage Tanks post-processing not enabled yet — current output remains unchanged.');
-        if (summaryEl) summaryEl.innerHTML = `<span style="color:#94a3b8;">Storage Tanks: output unchanged (${srcGeojson.features.length} objects).</span>`;
+        onPostProcessTypeChange();
         return;
     }
 
-    const btn = document.getElementById('btnApplyPostProcess');
-    if (btn) btn.disabled = true;
     if (ps) { ps.textContent = '⏳ Straightening building edges...'; ps.style.color = '#fbbf24'; }
 
     fetch('/api/postprocess', {
@@ -2447,22 +2476,13 @@ function applyPostProcessing() {
         addLog('error', 'Post-processing error: ' + e.message);
         if (ps) { ps.textContent = '❌ ' + e.message; ps.style.color = '#f87171'; }
         if (summaryEl) summaryEl.innerHTML = `<span style="color:#f87171;">❌ ${e.message}</span>`;
-    })
-    .finally(() => {
-        if (btn) btn.disabled = false;
     });
 }
 
 function resetPostProcessing() {
-    if (!originalPredictionGeojson || !originalPredictionGeojson.features) {
-        addLog('info', 'No original prediction cached to reset.');
-        return;
-    }
-    const restored = JSON.parse(JSON.stringify(originalPredictionGeojson));
-    _updatePredictMapWithGeojson(restored, originalPredictionShp);
-    const ps = document.getElementById('predictStatus'); if (ps) { ps.textContent = `✅ ${restored.features.length} objects`; ps.style.color = '#34d399'; }
-    const summaryEl = document.getElementById('postProcessSummary'); if (summaryEl) summaryEl.innerHTML = `<span style="color:#94a3b8;">Restored original prediction (${restored.features.length} objects).</span>`;
-    addLog('info', `Restored original prediction (${restored.features.length} objects).`);
+    const sel = document.getElementById('postProcessType');
+    if (sel) sel.value = 'none';
+    onPostProcessTypeChange();
 }
 function downloadShapefile() {
     if (lastPredictionShp) {
@@ -2659,4 +2679,4 @@ function clearPredictAoi() {
 window.handlePredictShpUpload = handlePredictShpUpload;
 window.clearPredictAoi = clearPredictAoi;
 window.toggleDrawAoiMode = toggleDrawAoiMode; window.handleAoiCreated = handleAoiCreated; window.zoomToAoi = zoomToAoi; window.toggleEditAoi = toggleEditAoi; window.deleteUserAoi = deleteUserAoi; window.clearAllUserAois = clearAllUserAois; window.toggleClusterOptions = toggleClusterOptions; window.executeClusterAOIs = executeClusterAOIs;
-window.selectProject = selectProject; window.deleteProject = deleteProject; window.showCreateProject = showCreateProject; window.closeCreateProject = closeCreateProject; window.createProjectFromNewModal = createProjectFromNewModal; window.createNewLabel = createNewLabel; window.selectLabel = selectLabel; window.startTraining = startTraining; window.stopTraining = stopTraining; window.runOverfitTest = runOverfitTest; window.loadModel = loadModel; window.deleteModel = deleteModel; window.showLoadModelDialog = showLoadModelDialog; window.evaluateModel = evaluateModel; window.clearEvaluationMetrics = clearEvaluationMetrics; window.drawEvaluationPolygons = drawEvaluationPolygons; window.runPrediction = runPrediction; window.runBatchPredict = runBatchPredict; window.clearPrediction = clearPrediction; window.downloadShapefile = downloadShapefile; window.downloadGeoJSON = downloadGeoJSON; window.exportGeoJSON = exportGeoJSON; window.exportShapefile = exportShapefile; window.mergeAllLabels = mergeAllLabels; window.downloadFile = downloadFile; window.saveAnnotations = saveAnnotations; window.loadAnnotations = loadAnnotations; window.clearAll = clearAll; window.deleteSelectedShape = deleteSelectedShape; window.previewLabelClusterAOIs = previewLabelClusterAOIs; window.clearLabelClusterAOIs = clearLabelClusterAOIs; window.setAOI = setAOI; window.captureMap = captureMap; window.lockTrainingScale = lockTrainingScale; window.buildDataset = buildDataset; window.saveTrainedModel = saveTrainedModel; window.openFolderBrowser = openFolderBrowser; window.showDashboard = showDashboard; window.showProjects = showProjects; window.showModels = showModels; window.showPublicDatasets = showPublicDatasets; window.showUploadedDatasets = showUploadedDatasets; window.showPurchasedDatasets = showPurchasedDatasets; window.showDownload = showDownload; window.switchWorkflow = switchWorkflow; window.searchLocation = searchLocation; window.searchPredictLocation = searchPredictLocation; window.searchEvalLocation = searchEvalLocation; window.refreshPublicDatasets = refreshPublicDatasets; window.refreshAnnotationModalList = refreshAnnotationModalList; window.loadUploadedDatasets = loadUploadedDatasets; window.loadProjects = loadProjects; window.loadModels = loadModels; window.loadLabels = loadLabels; window.renderPredictResults = renderPredictResults; window.zoomToPrediction = zoomToPrediction; window.getCurrentModelType = getCurrentModelType; window.isMaskRCNNModel = isMaskRCNNModel; window.toggleAdvanced = toggleAdvanced; window.getAdvancedTrainingSettings = getAdvancedTrainingSettings; window.loadModelFromModalDropdown = loadModelFromModalDropdown; window.refreshEvaluateModelStatus = refreshEvaluateModelStatus; window.layerToPolygonRing = layerToPolygonRing; window.layerToPolygonFeature = layerToPolygonFeature; window.ringToPolygonGeometry = ringToPolygonGeometry; window.featureToPolygonRing = featureToPolygonRing; window.importDlpk = importDlpk; window.exportDlpk = exportDlpk; window.downloadModel = downloadModel; window.loadFineTuneModelChoices = loadFineTuneModelChoices; window.selectFineTuneExistingModel = selectFineTuneExistingModel; window.importFineTuneModel = importFineTuneModel; window.startTrainingOrFineTune = startTrainingOrFineTune; window.startFineTune = startFineTune; window.exportModelWithFormat = exportModelWithFormat; window.setPredictResolution = setPredictResolution; window.updatePredictResolutionBadge = updatePredictResolutionBadge; window.applySuggestedThreshold = applySuggestedThreshold; window.setPredictTileSize = setPredictTileSize; window.updatePredictTileSizeBadge = updatePredictTileSizeBadge; window.setPredictSource = setPredictSource; window.applyPostProcessing = applyPostProcessing; window.resetPostProcessing = resetPostProcessing;
+window.selectProject = selectProject; window.deleteProject = deleteProject; window.showCreateProject = showCreateProject; window.closeCreateProject = closeCreateProject; window.createProjectFromNewModal = createProjectFromNewModal; window.createNewLabel = createNewLabel; window.selectLabel = selectLabel; window.startTraining = startTraining; window.stopTraining = stopTraining; window.runOverfitTest = runOverfitTest; window.loadModel = loadModel; window.deleteModel = deleteModel; window.showLoadModelDialog = showLoadModelDialog; window.evaluateModel = evaluateModel; window.clearEvaluationMetrics = clearEvaluationMetrics; window.drawEvaluationPolygons = drawEvaluationPolygons; window.runPrediction = runPrediction; window.runBatchPredict = runBatchPredict; window.clearPrediction = clearPrediction; window.downloadShapefile = downloadShapefile; window.downloadGeoJSON = downloadGeoJSON; window.exportGeoJSON = exportGeoJSON; window.exportShapefile = exportShapefile; window.mergeAllLabels = mergeAllLabels; window.downloadFile = downloadFile; window.saveAnnotations = saveAnnotations; window.loadAnnotations = loadAnnotations; window.clearAll = clearAll; window.deleteSelectedShape = deleteSelectedShape; window.previewLabelClusterAOIs = previewLabelClusterAOIs; window.clearLabelClusterAOIs = clearLabelClusterAOIs; window.setAOI = setAOI; window.captureMap = captureMap; window.lockTrainingScale = lockTrainingScale; window.buildDataset = buildDataset; window.saveTrainedModel = saveTrainedModel; window.openFolderBrowser = openFolderBrowser; window.showDashboard = showDashboard; window.showProjects = showProjects; window.showModels = showModels; window.showPublicDatasets = showPublicDatasets; window.showUploadedDatasets = showUploadedDatasets; window.showPurchasedDatasets = showPurchasedDatasets; window.showDownload = showDownload; window.switchWorkflow = switchWorkflow; window.searchLocation = searchLocation; window.searchPredictLocation = searchPredictLocation; window.searchEvalLocation = searchEvalLocation; window.refreshPublicDatasets = refreshPublicDatasets; window.refreshAnnotationModalList = refreshAnnotationModalList; window.loadUploadedDatasets = loadUploadedDatasets; window.loadProjects = loadProjects; window.loadModels = loadModels; window.loadLabels = loadLabels; window.renderPredictResults = renderPredictResults; window.zoomToPrediction = zoomToPrediction; window.getCurrentModelType = getCurrentModelType; window.isMaskRCNNModel = isMaskRCNNModel; window.toggleAdvanced = toggleAdvanced; window.getAdvancedTrainingSettings = getAdvancedTrainingSettings; window.loadModelFromModalDropdown = loadModelFromModalDropdown; window.refreshEvaluateModelStatus = refreshEvaluateModelStatus; window.layerToPolygonRing = layerToPolygonRing; window.layerToPolygonFeature = layerToPolygonFeature; window.ringToPolygonGeometry = ringToPolygonGeometry; window.featureToPolygonRing = featureToPolygonRing; window.importDlpk = importDlpk; window.exportDlpk = exportDlpk; window.downloadModel = downloadModel; window.loadFineTuneModelChoices = loadFineTuneModelChoices; window.selectFineTuneExistingModel = selectFineTuneExistingModel; window.importFineTuneModel = importFineTuneModel; window.startTrainingOrFineTune = startTrainingOrFineTune; window.startFineTune = startFineTune; window.exportModelWithFormat = exportModelWithFormat; window.setPredictResolution = setPredictResolution; window.updatePredictResolutionBadge = updatePredictResolutionBadge; window.applySuggestedThreshold = applySuggestedThreshold; window.setPredictTileSize = setPredictTileSize; window.updatePredictTileSizeBadge = updatePredictTileSizeBadge; window.setPredictSource = setPredictSource; window.onPostProcessTypeChange = onPostProcessTypeChange; window.applyPostProcessing = applyPostProcessing; window.resetPostProcessing = resetPostProcessing;

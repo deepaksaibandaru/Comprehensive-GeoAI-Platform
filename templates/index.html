@@ -737,21 +737,15 @@
                                 <div class="section-title">📐 POST PROCESSING</div>
                                 <div class="config-row" style="align-items:center;">
                                     <label for="postProcessType">Feature Type:</label>
-                                    <select id="postProcessType" style="flex:1;padding:5px 8px;background:#0f172a;border:1px solid #334155;color:#e2e8f0;border-radius:4px;font-size:11.5px;">
+                                    <select id="postProcessType" onchange="onPostProcessTypeChange()" style="flex:1;padding:5px 8px;background:#0f172a;border:1px solid #334155;color:#e2e8f0;border-radius:4px;font-size:11.5px;">
                                         <option value="buildings" selected>Buildings</option>
                                         <option value="storage_tanks">Storage Tanks</option>
+                                        <option value="roads">Roads</option>
+                                        <option value="none">None (Raw)</option>
                                     </select>
                                 </div>
                                 <div style="font-size:10px;color:#94a3b8;line-height:1.4;margin-top:6px;">
-                                    Straightens curved building edges only when <b>Buildings</b> is selected and you click <b>Apply Post Processing</b>.
-                                </div>
-                                <div style="display:flex;gap:6px;margin-top:8px;">
-                                    <button class="btn btn-info btn-sm" id="btnApplyPostProcess" onclick="applyPostProcessing()" style="flex:1;background:#0284c7;color:white;font-weight:600;font-size:11px;">
-                                        <i class="fas fa-check"></i> Apply Post Processing
-                                    </button>
-                                    <button class="btn btn-secondary btn-sm" onclick="resetPostProcessing()" title="Restore original prediction polygons" style="font-size:11px;">
-                                        <i class="fas fa-undo"></i> Reset
-                                    </button>
+                                    Applies automatically by Feature Type (<b>Buildings</b> straightens curved edges; <b>None</b> keeps raw output).
                                 </div>
                                 <div id="postProcessSummary" style="font-size:10px;color:#94a3b8;margin-top:6px;"></div>
                             </div>
@@ -904,7 +898,7 @@
         </div>
     </div>
 
-    <script src="/static/app.js?v=geoai-postprocess-20261126-v2"></script>
+    <script src="/static/app.js?v=geoai-postprocess-20261126-v3"></script>
     <script>
     // Direct global definition for shapefile upload & AOI management (bypasses browser caching)
     window.handlePredictShpUpload = function(event) {
