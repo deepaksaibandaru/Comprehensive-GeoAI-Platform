@@ -3139,15 +3139,60 @@ async def api_models_download(path: str):
     except Exception as exc:
         traceback.print_exc(); return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
 
+def _delete_model_file(raw_path: str):
+    if not raw_path or not str(raw_path).strip():
+        return JSONResponse({"success": False, "error": "Model path is required"}, status_code=400)
+    resolved = _safe_path(raw_path, depcfg.MODEL_ROOTS + depcfg.EXPORT_ROOTS, "model path")
+    if not resolved.lower().endswith((".pth", ".pt", ".ckpt", ".dlpk")):
+        return JSONResponse({"success": False, "error": "Only .pth, .pt, .ckpt or .dlpk model files can be deleted"}, status_code=400)
+    if not os.path.exists(resolved):
+        return JSONResponse({"success": False, "error": "Not found"}, status_code=404)
+    os.remove(resolved)
+
+    canonical = os.path.normcase(os.path.realpath(resolved))
+    for k in [key for key in list(_CHECKPOINT_META_CACHE.keys()) if key[0] == canonical]:
+        _CHECKPOINT_META_CACHE.pop(k, None)
+
+    # Clean up extracted DLPK cache folder if deleting an uploaded archive in _incoming
+    incoming_dir = os.path.realpath(os.path.join(depcfg.DLPK_IMPORT_DIR, "_incoming"))
+    if resolved.lower().endswith(".dlpk") and os.path.normcase(os.path.dirname(resolved)) == os.path.normcase(incoming_dir):
+        stem = os.path.splitext(os.path.basename(resolved))[0]
+        base_stem = re.sub(r'_\d{8}_\d{6}$', '', stem)
+        for cand_name in {stem, dlpk._safe_stem(stem), base_stem, dlpk._safe_stem(base_stem)}:
+            if not cand_name:
+                continue
+            cand_dir = os.path.realpath(os.path.join(depcfg.DLPK_IMPORT_DIR, cand_name))
+            try:
+                if os.path.isdir(cand_dir) and os.path.normcase(os.path.commonpath([cand_dir, os.path.realpath(depcfg.DLPK_IMPORT_DIR)])) == os.path.normcase(os.path.realpath(depcfg.DLPK_IMPORT_DIR)) and cand_dir != incoming_dir:
+                    shutil.rmtree(cand_dir, ignore_errors=True)
+            except Exception:
+                pass
+    return JSONResponse({"success": True})
+
+@app.post("/api/models/delete", dependencies=[Depends(require_api_key)])
+async def api_models_delete_post(data: Dict):
+    try:
+        return _delete_model_file(data.get("path") or data.get("model_path") or "")
+    except HTTPException as exc:
+        return JSONResponse({"success": False, "error": exc.detail}, status_code=exc.status_code)
+    except Exception as e:
+        traceback.print_exc(); return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+@app.delete("/api/models", dependencies=[Depends(require_api_key)])
+async def api_models_delete_query(path: str):
+    try:
+        return _delete_model_file(path)
+    except HTTPException as exc:
+        return JSONResponse({"success": False, "error": exc.detail}, status_code=exc.status_code)
+    except Exception as e:
+        traceback.print_exc(); return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
 @app.delete("/api/models/{path:path}", dependencies=[Depends(require_api_key)])
 async def api_models_delete(path: str):
     try:
-        path = _safe_path(path, depcfg.MODEL_ROOTS + depcfg.EXPORT_ROOTS, "model path")
-        if not path.lower().endswith((".pth", ".pt", ".ckpt")): return JSONResponse({"success": False, "error": "Only .pth, .pt or .ckpt model files can be deleted"}, status_code=400)
-        if not os.path.exists(path): return JSONResponse({"success": False, "error": "Not found"}, status_code=404)
-        os.remove(path)
-        return JSONResponse({"success": True})
-    except HTTPException: raise
+        return _delete_model_file(path)
+    except HTTPException as exc:
+        return JSONResponse({"success": False, "error": exc.detail}, status_code=exc.status_code)
     except Exception as e:
         traceback.print_exc(); return JSONResponse({"success": False, "error": str(e)}, status_code=500)
 

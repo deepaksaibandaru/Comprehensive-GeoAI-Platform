@@ -1964,7 +1964,35 @@ function importDlpk(input) {
 }
 
 function downloadModel(path) { if (!path) return; const name = String(path).split(/[\\/]/).pop(); fetch('/api/models/download?path=' + encodeURIComponent(path)).then(async r => { if (!r.ok) { alert('Download failed'); return null; } return r.blob(); }).then(blob => { if (!blob) return; const url = URL.createObjectURL(blob), a = document.createElement('a'); a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 10000); }); }
-function deleteModel(path) { if (!confirm('Delete model?')) return; fetch('/api/models/' + encodeURIComponent(path.replace(/\\/g, '/')), {method:'DELETE'}).then(r => r.json()).then(d => { if (d.success) { if (loadedModelPath === path.replace(/\\/g, '/')) { loadedModelPath = null; trainingStats.isModelLoaded = false; } loadModels(); } }); }
+function deleteModel(path) {
+    if (!path || !confirm('Delete model?')) return;
+    const normPath = normalizeModelPath(path);
+    fetch('/api/models/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: normPath })
+    })
+    .then(async r => {
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok || !d.success) throw new Error(d.error || d.detail || (`HTTP ${r.status}`));
+        return d;
+    })
+    .then(() => {
+        if (normalizeModelPath(loadedModelPath) === normPath) {
+            loadedModelPath = null;
+            trainingStats.isModelLoaded = false;
+        }
+        const list = document.getElementById('yourModelsList');
+        if (list) list.dataset.signature = '';
+        addLog('success', `Deleted model: ${normPath.split('/').pop()}`);
+        loadModels();
+    })
+    .catch(e => {
+        console.error('deleteModel error:', e);
+        addLog('error', 'Failed to delete model: ' + e.message);
+        alert('Could not delete model: ' + e.message);
+    });
+}
 function showLoadModelDialog() { const m = document.getElementById('modelSelectModal'); if (m) m.classList.add('active'); loadModelsForModal(); setTimeout(refreshEvaluateModelStatus, 300); }
 
 function loadModelsForModal() {
